@@ -1,0 +1,247 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+from src.model import (
+    PRODUCTION_FEATURE_COLUMNS,
+    PRODUCTION_FEATURE_SET_NAME,
+    PLAYOFF_CONTEXT_FEATURE_COLUMNS,
+    PREDICTION_MODE_CURRENT,
+    PREDICTION_MODE_PLAYOFF,
+    SERIES_CONTEXT_FEATURES,
+    compare_models_by_season,
+    evaluate_home_feature_ablation,
+    evaluate_feature_group_ablation,
+    get_model_entry_for_mode,
+    load_model,
+    select_features_with_extra_trees,
+    train_production_models,
+)
+from src.nba_data import FEATURE_COLUMNS
+
+
+class ModelComparisonTests(unittest.TestCase):
+    def test_compares_models_and_saves_outputs(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(8):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {
+                    "SEASON": season,
+                    "TEAM_A_WON": target,
+                }
+                for feature_index, feature in enumerate(FEATURE_COLUMNS):
+                    row[feature] = float(target * 2 - 1 + feature_index * 0.01)
+                rows.append(row)
+
+        frame = pd.DataFrame(rows)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.joblib"
+            comparison_path = Path(tmpdir) / "model_comparison.csv"
+            importance_path = Path(tmpdir) / "feature_importances.csv"
+            selection_path = Path(tmpdir) / "feature_selection.csv"
+            feature_selection, selected_features = select_features_with_extra_trees(
+                frame,
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                feature_selection_path=selection_path,
+            )
+            comparison = compare_models_by_season(
+                frame,
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                model_path=model_path,
+                comparison_path=comparison_path,
+                feature_importance_path=importance_path,
+                feature_columns=selected_features,
+            )
+
+            self.assertEqual(
+                set(comparison["model"]),
+                {
+                    "Logistic Regression",
+                    "Random Forest",
+                    "Gradient Boosting",
+                    "Extra Trees",
+                    "SVC",
+                    "AdaBoost",
+                    "KNN",
+                },
+            )
+            self.assertTrue({"accuracy", "roc_auc", "precision", "recall", "f1"}.issubset(comparison.columns))
+            self.assertEqual(comparison["roc_auc"].tolist(), sorted(comparison["roc_auc"].tolist(), reverse=True))
+            self.assertTrue(model_path.exists())
+            self.assertTrue(comparison_path.exists())
+            self.assertTrue(importance_path.exists())
+            self.assertTrue(selection_path.exists())
+            self.assertEqual(feature_selection["roc_auc"].tolist(), sorted(feature_selection["roc_auc"].tolist(), reverse=True))
+            self.assertEqual(load_model(model_path)["feature_columns"], selected_features)
+
+    def test_feature_group_ablation_saves_best_model(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {
+                    "SEASON": season,
+                    "TEAM_A_WON": target,
+                }
+                for feature_index, feature in enumerate(FEATURE_COLUMNS):
+                    signal = float(target * 2 - 1)
+                    row[feature] = signal + feature_index * 0.001
+                rows.append(row)
+
+        frame = pd.DataFrame(rows)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.joblib"
+            ablation_path = Path(tmpdir) / "feature_ablation.csv"
+            importance_path = Path(tmpdir) / "feature_importances.csv"
+            ablation = evaluate_feature_group_ablation(
+                frame,
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                ablation_path=ablation_path,
+                model_path=model_path,
+                feature_importance_path=importance_path,
+            )
+
+            expected_sets = {
+                "baseline_original_features",
+                "baseline_plus_corrected_signs",
+                "baseline_plus_h2h",
+                "baseline_plus_style_matchups",
+                "baseline_plus_weighted_recent_form",
+                "baseline_plus_star_features",
+                "all_features",
+                "top_10_by_importance",
+                "top_15_by_importance",
+                "top_20_by_importance",
+            }
+            self.assertTrue(expected_sets.issubset(set(ablation["feature_set"])))
+            self.assertEqual(set(ablation["model"]), {"Random Forest", "Extra Trees"})
+            self.assertTrue({"accuracy", "roc_auc", "precision", "recall", "f1", "n_features"}.issubset(ablation.columns))
+            self.assertTrue(ablation_path.exists())
+            self.assertTrue(model_path.exists())
+            self.assertTrue(importance_path.exists())
+            saved = load_model(model_path)
+            self.assertEqual(saved["feature_set"], PRODUCTION_FEATURE_SET_NAME)
+            production_rows = ablation[ablation["feature_set"].eq(PRODUCTION_FEATURE_SET_NAME)]
+            production_winner = production_rows.sort_values(["roc_auc", "accuracy", "f1"], ascending=False).iloc[0]
+            self.assertEqual(saved["feature_columns"], str(production_winner["features"]).split(","))
+
+    def test_production_feature_set_is_corrected_baseline(self):
+        self.assertEqual(
+            PRODUCTION_FEATURE_COLUMNS,
+            [
+                "OFF_RATING_DIFF",
+                "DEF_RATING_DIFF",
+                "NET_RATING_DIFF",
+                "W_PCT_DIFF",
+                "PLUS_MINUS_DIFF",
+                "PACE_DIFF",
+                "home_team_A",
+                "home_advantage_diff",
+                "seed_difference",
+                "higher_seed_A",
+            ],
+        )
+
+    def test_home_feature_ablation_saves_results(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {"SEASON": season, "TEAM_A_WON": target}
+                for feature in FEATURE_COLUMNS:
+                    row[feature] = float(target)
+                rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "home_feature_ablation.csv"
+            results = evaluate_home_feature_ablation(
+                pd.DataFrame(rows),
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                home_ablation_path=path,
+            )
+
+            self.assertTrue(path.exists())
+            self.assertIn("home_advantage_diff", set(results["home_feature_set"]))
+            self.assertIn("is_selected_production_home_design", results.columns)
+            selected_rows = results[results["is_selected_production_home_design"]]
+            self.assertFalse(selected_rows.empty)
+            self.assertEqual(set(selected_rows["home_feature_set"]), set(selected_rows["selected_home_feature_design"]))
+
+    def test_train_production_models_saves_two_prediction_modes(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {"SEASON": season, "TEAM_A_WON": target}
+                for feature in FEATURE_COLUMNS:
+                    row[feature] = float(target)
+                row["series_score_diff"] = float(game_index % 3 - 1)
+                row["game_number"] = float((game_index % 7) + 1)
+                row["elimination_game"] = float(game_index % 2)
+                rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.joblib"
+            artifact = train_production_models(
+                pd.DataFrame(rows),
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                model_path=model_path,
+                feature_importance_path=Path(tmpdir) / "feature_importances.csv",
+            )
+
+            saved = load_model(model_path)
+            self.assertEqual(saved["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
+            self.assertIn("current_hypothetical_model", saved)
+            self.assertIn("playoff_context_model", saved)
+            self.assertIn("current_hypothetical_features", saved)
+            self.assertIn("playoff_context_features", saved)
+            self.assertEqual(saved["metadata"]["selected_home_feature_design"], saved["selected_home_feature_design"])
+            self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_CURRENT)["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
+            self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_PLAYOFF)["feature_columns"], PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+            self.assertNotEqual(saved["current_hypothetical_features"], saved["playoff_context_features"])
+            for feature in SERIES_CONTEXT_FEATURES:
+                self.assertNotIn(feature, PRODUCTION_FEATURE_COLUMNS)
+                self.assertIn(feature, PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+
+    def test_top_n_feature_selection_excludes_series_context_by_default(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {"SEASON": season, "TEAM_A_WON": target}
+                for feature in FEATURE_COLUMNS:
+                    row[feature] = float(target)
+                for feature in SERIES_CONTEXT_FEATURES:
+                    row[feature] = float(target * 100)
+                rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            selection, _ = select_features_with_extra_trees(
+                pd.DataFrame(rows),
+                train_seasons=["2021-22", "2022-23"],
+                test_seasons=["2023-24", "2024-25"],
+                feature_selection_path=Path(tmpdir) / "feature_selection.csv",
+            )
+
+        selected_feature_text = ",".join(selection["features"].astype(str).tolist())
+        for feature in SERIES_CONTEXT_FEATURES:
+            self.assertNotIn(feature, selected_feature_text)
+
+
+if __name__ == "__main__":
+    unittest.main()
