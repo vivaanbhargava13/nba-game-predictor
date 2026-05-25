@@ -8,3 +8,5 @@ data/processed/
 models/
 reports/figures/
 reports/.matplotlib/
+data/cache/
+data/processed/
