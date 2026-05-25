@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import json
 import html
+import queue
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from src.model import (
     load_model,
 )
 from src.nba_data import FEATURE_COLUMNS, load_team_stats
+from src.live_games import load_live_games, nba_season_from_date
 from src.predictor import DEFAULT_CACHE_DIR, DEFAULT_MODEL_PATH, _predict_probability, validate_series_score
 
 
@@ -83,6 +86,36 @@ def cached_model(model_path: str):
 @st.cache_data(show_spinner=False)
 def cached_team_stats(season: str, season_type: str) -> pd.DataFrame:
     return load_team_stats(season, cache_dir=DEFAULT_CACHE_DIR, season_type=season_type)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_live_games() -> dict:
+    return load_live_games()
+
+
+def safe_live_games_payload(fetcher=load_live_games, timeout_seconds: float = 1.5) -> dict:
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def fetch_in_background() -> None:
+        try:
+            result_queue.put(fetcher())
+        except Exception as exc:
+            result_queue.put(exc)
+
+    thread = threading.Thread(target=fetch_in_background, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        return {"latest": [], "upcoming": [], "error": "Live games unavailable right now."}
+
+    try:
+        result = result_queue.get_nowait()
+        if isinstance(result, Exception):
+            raise result
+        payload = result
+        return payload if isinstance(payload, dict) else {"latest": [], "upcoming": [], "error": "Live games unavailable"}
+    except Exception as exc:
+        return {"latest": [], "upcoming": [], "error": str(exc)}
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -595,6 +628,58 @@ def inject_dashboard_css() -> None:
                 width: 18px !important;
                 height: 18px !important;
             }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Series Score"]) [data-baseweb="select"] > div {{
+                min-height: 2.35rem !important;
+                height: 2.35rem !important;
+                border-radius: 8px !important;
+                background: #FFFFFF !important;
+                border: 1px solid #D9DEE7 !important;
+                color: var(--ink) !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Series Score"]) [data-baseweb="select"] > div > div:first-child {{
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                text-align: center !important;
+                font-weight: 850 !important;
+                letter-spacing: 0 !important;
+                white-space: nowrap !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Series Score"]) [data-baseweb="select"] input {{
+                caret-color: transparent !important;
+                color: transparent !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stNumberInput"]:has(input[aria-label*="series wins"]) {{
+                margin-bottom: 0 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stNumberInput"]:has(input[aria-label*="series wins"]) > div {{
+                width: 52px !important;
+                min-width: 52px !important;
+                max-width: 52px !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stNumberInput"]:has(input[aria-label*="series wins"]) input {{
+                height: 2rem !important;
+                min-height: 2rem !important;
+                padding: 0 !important;
+                text-align: center !important;
+                background: #FFFFFF !important;
+                color: var(--ink) !important;
+                -webkit-text-fill-color: var(--ink) !important;
+                border: 1px solid #D9DEE7 !important;
+                border-radius: 7px !important;
+                font-size: 0.88rem !important;
+                font-weight: 750 !important;
+                opacity: 1 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stNumberInput"]:has(input[aria-label*="series wins"]) input:disabled {{
+                background: #F7F8FA !important;
+                color: var(--ink) !important;
+                -webkit-text-fill-color: var(--ink) !important;
+                opacity: 1 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stNumberInput"]:has(input[aria-label*="series wins"]) button {{
+                display: none !important;
+            }}
             .dashboard-title {{
                 font-size: 2.15rem;
                 line-height: 1.15;
@@ -607,6 +692,114 @@ def inject_dashboard_css() -> None:
                 font-size: 1rem;
                 margin-top: 0.45rem;
                 margin-bottom: 1.1rem;
+            }}
+            .live-games-board {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 1rem;
+                margin: 0.25rem 0 1rem;
+            }}
+            .live-games-section {{
+                background: #FFFFFF;
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 0.85rem;
+                box-shadow: 0 8px 24px rgba(23, 32, 51, 0.045);
+            }}
+            .live-games-heading {{
+                color: var(--ink);
+                font-size: 0.9rem;
+                font-weight: 900;
+                margin-bottom: 0.55rem;
+            }}
+            .live-games-row {{
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 0.55rem;
+            }}
+            .live-game-card {{
+                border: 1px solid #E5E9F0;
+                border-radius: 8px;
+                padding: 0.62rem 0.55rem;
+                text-align: center;
+                background: #FBFCFE;
+                min-height: 116px;
+            }}
+            .live-game-teams {{
+                display: flex;
+                justify-content: center;
+                align-items: baseline;
+                gap: 0.35rem;
+                font-weight: 950;
+                font-size: 1.05rem;
+                letter-spacing: 0;
+                white-space: nowrap;
+            }}
+            .live-game-vs {{
+                color: var(--muted);
+                font-size: 0.75rem;
+                font-weight: 850;
+            }}
+            .live-game-date {{
+                color: var(--muted);
+                font-size: 0.76rem;
+                margin-top: 0.3rem;
+                min-height: 1.1rem;
+            }}
+            .live-game-score,
+            .live-game-prediction {{
+                color: var(--ink);
+                font-size: 0.86rem;
+                margin-top: 0.4rem;
+                line-height: 1.25;
+            }}
+            .live-game-note {{
+                color: var(--muted);
+                font-size: 0.78rem;
+                margin-top: 0.42rem;
+            }}
+            .live-game-card strong {{
+                color: var(--ink);
+                font-weight: 950;
+            }}
+            .live-game-load-note {{
+                color: var(--muted);
+                font-size: 0.72rem;
+                text-align: center;
+                margin: 0.25rem 0 0.15rem;
+            }}
+            div[data-testid="stButton"] > button[kind="secondary"] {{
+                background: #FFFFFF !important;
+                color: var(--ink) !important;
+                border: 1px solid #D9DEE7 !important;
+                border-radius: 7px !important;
+                box-shadow: none !important;
+                min-height: 2.1rem !important;
+                padding: 0.35rem 0.55rem !important;
+                font-size: 0.78rem !important;
+                line-height: 1.1 !important;
+                font-weight: 800 !important;
+            }}
+            div[data-testid="stButton"] > button[kind="secondary"]:hover {{
+                border-color: color-mix(in srgb, var(--team-a) 45%, #D9DEE7) !important;
+                background: #F8FAFC !important;
+                color: var(--ink) !important;
+            }}
+            div[data-testid="stButton"] > button[kind="secondary"] p {{
+                color: var(--ink) !important;
+                font-size: 0.78rem !important;
+                line-height: 1.1 !important;
+                white-space: nowrap !important;
+            }}
+            @media (max-width: 980px) {{
+                .live-games-board {{
+                    grid-template-columns: 1fr;
+                }}
+            }}
+            @media (max-width: 720px) {{
+                .live-games-row {{
+                    grid-template-columns: 1fr;
+                }}
             }}
             .panel {{
                 background: var(--surface);
@@ -1007,6 +1200,360 @@ def render_header() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _team_gradient_span(abbreviation: str) -> str:
+    colors = get_team_colors(abbreviation)
+    safe_abbr = html.escape(str(abbreviation))
+    return (
+        '<span class="team-gradient-text" '
+        f'style="--gradient-start:{colors["primary"]}; --gradient-end:{colors["secondary"]}; '
+        f'--fallback-color:{colors["accent_text"]};">{safe_abbr}</span>'
+    )
+
+
+def _score_text(game: dict) -> str:
+    away_score = game.get("away_score")
+    home_score = game.get("home_score")
+    if away_score is None or home_score is None:
+        return "Final score unavailable"
+    away_bold = int(away_score) > int(home_score)
+    home_bold = int(home_score) > int(away_score)
+    away = f"<strong>{away_score}</strong>" if away_bold else str(away_score)
+    home = f"<strong>{home_score}</strong>" if home_bold else str(home_score)
+    return f"{html.escape(str(game.get('away_abbr', '')))} {away} - {home} {html.escape(str(game.get('home_abbr', '')))}"
+
+
+def live_game_context_lines(game: dict) -> list[str]:
+    lines: list[str] = []
+    series_status = str(game.get("series_status") or "").strip()
+    if series_status:
+        lines.append(series_status)
+    if bool(game.get("if_necessary")):
+        lines.append("IF NECESSARY")
+    return lines
+
+
+def _plain_score_text(game: dict) -> str:
+    away_score = game.get("away_score")
+    home_score = game.get("home_score")
+    if away_score is None or home_score is None:
+        return "Final score unavailable"
+    away_abbr = str(game.get("away_abbr") or "")
+    home_abbr = str(game.get("home_abbr") or "")
+    return f"{away_abbr} {away_score} - {home_score} {home_abbr}"
+
+
+def _upcoming_prediction_result(
+    game: dict,
+    model_available: bool,
+    predictor=_predict_probability,
+) -> tuple[str, str | None]:
+    if not model_available:
+        return "Prediction unavailable", "Model artifact is unavailable."
+    away_abbr = str(game.get("away_abbr", ""))
+    home_abbr = str(game.get("home_abbr", ""))
+    eastern_game_date = live_game_date(game)
+    try:
+        probability, *_ = predictor(
+            team_a=away_abbr,
+            team_b=home_abbr,
+            season=nba_season_from_date(eastern_game_date),
+            prediction_date=eastern_game_date.isoformat(),
+            home_team="team2",
+            cache_dir=DEFAULT_CACHE_DIR,
+            feature_season_type=DEFAULT_SEASON_TYPE,
+            model_path=DEFAULT_MODEL_PATH,
+            prediction_context_mode=PREDICTION_MODE_CURRENT,
+        )
+    except Exception as exc:
+        return "Prediction unavailable", f"{away_abbr} @ {home_abbr}: {exc}"
+
+    away_pct = f"{probability:.0%}"
+    home_pct = f"{1 - probability:.0%}"
+    if probability >= 0.5:
+        away_pct = f"<strong>{away_pct}</strong>"
+    else:
+        home_pct = f"<strong>{home_pct}</strong>"
+    return f"{html.escape(away_abbr)} {away_pct} - {home_pct} {html.escape(home_abbr)}", None
+
+
+def _upcoming_prediction(game: dict, model_available: bool) -> str:
+    prediction, _debug = _upcoming_prediction_result(game, model_available)
+    return prediction
+
+
+def _plain_upcoming_prediction(prediction_html: str) -> str:
+    return (
+        prediction_html.replace("<strong>", "")
+        .replace("</strong>", "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
+
+
+def _latest_game_card_html(game: dict) -> str:
+    context = "".join(f'<div class="live-game-note">{html.escape(line)}</div>' for line in live_game_context_lines(game))
+    return (
+        '<div class="live-game-card">'
+        f'<div class="live-game-teams">{_team_gradient_span(game.get("away_abbr", ""))}'
+        f'<span class="live-game-vs">@</span>{_team_gradient_span(game.get("home_abbr", ""))}</div>'
+        f'<div class="live-game-date">{html.escape(str(game.get("time_label") or game.get("date_label") or ""))}</div>'
+        f"{context}"
+        f'<div class="live-game-score">{_score_text(game)}</div>'
+        "</div>"
+    )
+
+
+def _upcoming_game_card_html_from_prediction(game: dict, prediction_html: str) -> str:
+    context = "".join(f'<div class="live-game-note">{html.escape(line)}</div>' for line in live_game_context_lines(game))
+    return (
+        '<div class="live-game-card">'
+        f'<div class="live-game-teams">{_team_gradient_span(game.get("away_abbr", ""))}'
+        f'<span class="live-game-vs">@</span>{_team_gradient_span(game.get("home_abbr", ""))}</div>'
+        f'<div class="live-game-date">{html.escape(str(game.get("time_label") or game.get("date_label") or ""))}</div>'
+        f"{context}"
+        f'<div class="live-game-prediction">{prediction_html}</div>'
+        "</div>"
+    )
+
+
+def _upcoming_game_card_html(game: dict, model_available: bool) -> str:
+    prediction, _debug = _upcoming_prediction_result(game, model_available)
+    return _upcoming_game_card_html_from_prediction(game, prediction)
+
+
+def build_live_games_topbar_html(live_games: dict, model_available: bool) -> str:
+    live_games = live_games if isinstance(live_games, dict) else {"latest": [], "upcoming": []}
+    latest_cards = [_latest_game_card_html(game) for game in (live_games.get("latest") or [])[:3]]
+    upcoming_cards = [_upcoming_game_card_html(game, model_available) for game in (live_games.get("upcoming") or [])[:3]]
+    if not latest_cards:
+        latest_cards = ['<div class="live-game-card"><div class="live-game-note">Latest games unavailable</div></div>']
+    if not upcoming_cards:
+        upcoming_cards = ['<div class="live-game-card"><div class="live-game-note">Upcoming games unavailable</div></div>']
+
+    return (
+        '<div class="live-games-board">'
+        '<section class="live-games-section">'
+        '<div class="live-games-heading">Latest Games</div>'
+        f'<div class="live-games-row">{"".join(latest_cards)}</div>'
+        "</section>"
+        '<section class="live-games-section">'
+        '<div class="live-games-heading">Upcoming Games</div>'
+        f'<div class="live-games-row">{"".join(upcoming_cards)}</div>'
+        "</section>"
+        "</div>"
+    )
+
+
+def team_label_for_abbr(labels: list[str], abbreviation: str) -> str:
+    suffix = f"({abbreviation})"
+    for label in labels:
+        if label.endswith(suffix):
+            return label
+    raise ValueError(f"Team abbreviation {abbreviation} is not available in the current team list.")
+
+
+def live_game_date(game: dict) -> date:
+    raw_value = game.get("game_datetime") or game.get("game_date")
+    if not raw_value:
+        return date.today()
+    timestamp = pd.to_datetime(raw_value, errors="coerce")
+    if pd.isna(timestamp):
+        return date.today()
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("America/New_York")
+    else:
+        timestamp = timestamp.tz_convert("America/New_York")
+    return timestamp.tz_convert("America/New_York").date()
+
+
+def live_game_selection_state(game: dict, labels: list[str]) -> dict:
+    away_abbr = str(game.get("away_abbr") or "")
+    home_abbr = str(game.get("home_abbr") or "")
+    away_label = team_label_for_abbr(labels, away_abbr)
+    home_label = team_label_for_abbr(labels, home_abbr)
+    game_date = live_game_date(game)
+    season = str(game.get("season") or nba_season_from_date(game_date))
+    if season not in SEASON_OPTIONS:
+        season = DEFAULT_SEASON
+
+    away_series_wins = game.get("away_series_wins")
+    home_series_wins = game.get("home_series_wins")
+    has_series_context = (
+        bool(game.get("series_status"))
+        or bool(game.get("if_necessary"))
+        or game.get("game_number") is not None
+        or away_series_wins is not None
+        or home_series_wins is not None
+    )
+    game_number = int(game.get("game_number") or 1)
+    game_number = min(7, max(1, game_number))
+    team_a_series_wins = int(away_series_wins or 0)
+    if game_number == 7:
+        team_a_series_wins = 3
+    else:
+        team_a_series_wins = min(team_a_series_wins, max(0, game_number - 1))
+
+    return {
+        "selected_team_label": away_label,
+        "opponent_team_label": home_label,
+        "home_team_label": home_label,
+        "prediction_date": game_date,
+        "season": season,
+        "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
+        "game_number": game_number,
+        "team_a_series_wins": team_a_series_wins,
+    }
+
+
+def live_game_payload(game: dict) -> dict:
+    game_date = live_game_date(game)
+    away_series_wins = game.get("away_series_wins")
+    home_series_wins = game.get("home_series_wins")
+    game_number = game.get("game_number")
+    return {
+        "game_id": str(game.get("game_id") or ""),
+        "away_abbr": str(game.get("away_abbr") or ""),
+        "home_abbr": str(game.get("home_abbr") or ""),
+        "game_datetime": game.get("game_datetime"),
+        "game_date": game_date.isoformat(),
+        "game_time": str(game.get("time_label") or game.get("date_label") or ""),
+        "season": nba_season_from_date(game_date),
+        "series_status": str(game.get("series_status") or ""),
+        "game_number": None if game_number is None else int(game_number),
+        "away_series_wins": None if away_series_wins is None else int(away_series_wins),
+        "home_series_wins": None if home_series_wins is None else int(home_series_wins),
+        "if_necessary": bool(game.get("if_necessary")),
+        "away_score": game.get("away_score"),
+        "home_score": game.get("home_score"),
+        "date_label": str(game.get("date_label") or ""),
+        "time_label": str(game.get("time_label") or game.get("date_label") or ""),
+    }
+
+
+def live_card_key(section: str, payload: dict, index: int) -> str:
+    safe_game_id = "".join(character if character.isalnum() else "_" for character in str(payload.get("game_id") or "unknown"))
+    return f"live_card_{section}_{safe_game_id}_{index}"
+
+
+def apply_live_game_selection(game: dict, labels: list[str]) -> None:
+    try:
+        st.session_state.update(live_game_selection_state(dict(game), labels))
+        st.session_state.pop("prediction_payload", None)
+        st.session_state.pop("prediction_context", None)
+        st.session_state.pop("prediction_chat_messages", None)
+        st.session_state.pop("live_game_selection_error", None)
+    except Exception as exc:
+        st.session_state["live_game_selection_error"] = str(exc)
+
+
+def live_game_button_label(game: dict, *, is_upcoming: bool, model_available: bool) -> tuple[str, str | None]:
+    away_abbr = str(game.get("away_abbr") or "")
+    home_abbr = str(game.get("home_abbr") or "")
+    lines = [
+        f"{away_abbr} @ {home_abbr}",
+        str(game.get("time_label") or game.get("date_label") or ""),
+        *live_game_context_lines(game),
+    ]
+    debug = None
+    if is_upcoming:
+        prediction_html, debug = _upcoming_prediction_result(game, model_available)
+        lines.append(_plain_upcoming_prediction(prediction_html))
+    else:
+        lines.append(_plain_score_text(game))
+    return "\n".join(line for line in lines if line), debug
+
+
+def live_game_render_payloads(live_games: dict, section: str) -> list[dict]:
+    return [live_game_payload(game) for game in (live_games.get(section) or [])[:3]]
+
+
+def render_live_card_button(payload: dict, labels: list[str], section: str, index: int) -> None:
+    away_abbr = str(payload.get("away_abbr") or "")
+    home_abbr = str(payload.get("home_abbr") or "")
+    st.markdown('<div class="live-game-load-note">Click to load this matchup</div>', unsafe_allow_html=True)
+    st.button(
+        f"Load {away_abbr} @ {home_abbr}",
+        key=live_card_key(section, payload, index),
+        on_click=apply_live_game_selection,
+        args=(dict(payload), labels),
+        width="stretch",
+    )
+
+
+def render_live_games_topbar(live_games: dict, model_available: bool, labels: list[str]) -> None:
+    live_games = live_games if isinstance(live_games, dict) else {"latest": [], "upcoming": []}
+    st.markdown('<div class="live-games-board streamlit-live-games">', unsafe_allow_html=True)
+    latest_section, upcoming_section = st.columns(2, gap="medium")
+    debug_rows: list[dict[str, str]] = []
+
+    with latest_section:
+        st.markdown('<div class="live-games-heading">Latest Games</div>', unsafe_allow_html=True)
+        latest_games = live_game_render_payloads(live_games, "latest")
+        if not latest_games:
+            st.markdown('<div class="live-game-note">Latest games unavailable</div>', unsafe_allow_html=True)
+        else:
+            latest_cols = st.columns(len(latest_games), gap="small")
+            for index, payload in enumerate(latest_games):
+                with latest_cols[index]:
+                    st.markdown(_latest_game_card_html(payload), unsafe_allow_html=True)
+                    render_live_card_button(payload, labels, "latest", index)
+
+    with upcoming_section:
+        st.markdown('<div class="live-games-heading">Upcoming Games</div>', unsafe_allow_html=True)
+        upcoming_games = live_game_render_payloads(live_games, "upcoming")
+        if not upcoming_games:
+            st.markdown('<div class="live-game-note">Upcoming games unavailable</div>', unsafe_allow_html=True)
+        else:
+            upcoming_cols = st.columns(len(upcoming_games), gap="small")
+            for index, payload in enumerate(upcoming_games):
+                prediction, debug = _upcoming_prediction_result(payload, model_available)
+                if debug:
+                    debug_rows.append(
+                        {
+                            "game_id": str(payload.get("game_id") or ""),
+                            "game": f"{payload.get('away_abbr')} @ {payload.get('home_abbr')}",
+                            "reason": debug,
+                        }
+                    )
+                with upcoming_cols[index]:
+                    st.markdown(_upcoming_game_card_html_from_prediction(payload, prediction), unsafe_allow_html=True)
+                    render_live_card_button(payload, labels, "upcoming", index)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    selection_error = st.session_state.get("live_game_selection_error")
+    if selection_error:
+        debug_rows.append({"game_id": "", "game": "Live card selection", "reason": selection_error})
+    st.session_state["live_game_prediction_debug"] = debug_rows
+
+
+def render_live_games_topbar_safe(model_available: bool, labels: list[str]) -> None:
+    try:
+        live_games = safe_live_games_payload()
+        if not live_games.get("latest") and not live_games.get("upcoming"):
+            st.session_state["live_game_prediction_debug"] = []
+            st.markdown(
+                """
+                <div class="panel-note" style="margin:0.15rem 0 0.75rem;">
+                    Live games unavailable right now.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+        render_live_games_topbar(live_games, model_available=model_available, labels=labels)
+    except Exception:
+        st.session_state["live_game_prediction_debug"] = []
+        st.markdown(
+            """
+            <div class="panel-note" style="margin:0.15rem 0 0.75rem;">
+                Live games unavailable right now.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_matchup_strip(
@@ -1931,9 +2478,14 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("## Matchup Setup")
-        season = st.selectbox("Season", SEASON_OPTIONS, index=SEASON_OPTIONS.index(DEFAULT_SEASON))
-        season_type = st.selectbox("Stats source", ["Regular Season", "Playoffs"], index=0)
-        prediction_date = st.date_input("Prediction date", value=date.today())
+        if st.session_state.get("season") not in SEASON_OPTIONS:
+            st.session_state["season"] = DEFAULT_SEASON
+        if st.session_state.get("season_type") not in ["Regular Season", "Playoffs"]:
+            st.session_state["season_type"] = DEFAULT_SEASON_TYPE
+        st.session_state.setdefault("prediction_date", date.today())
+        season = st.selectbox("Season", SEASON_OPTIONS, key="season")
+        season_type = st.selectbox("Stats source", ["Regular Season", "Playoffs"], key="season_type")
+        prediction_date = st.date_input("Prediction date", key="prediction_date")
         st.markdown('<div class="sidebar-compact-separator"></div>', unsafe_allow_html=True)
 
     model_bundle = cached_model(str(model_path))
@@ -1958,11 +2510,20 @@ def main() -> None:
     labels = list(team_options)
 
     with st.sidebar:
-        team_a_label = st.selectbox("Selected team", labels, index=labels.index("Boston Celtics (BOS)") if "Boston Celtics (BOS)" in labels else 0)
+        default_a_label = "Boston Celtics (BOS)" if "Boston Celtics (BOS)" in labels else labels[0]
+        if st.session_state.get("selected_team_label") not in labels:
+            st.session_state["selected_team_label"] = default_a_label
+        team_a_label = st.selectbox("Selected team", labels, key="selected_team_label")
         default_b_index = labels.index("New York Knicks (NYK)") if "New York Knicks (NYK)" in labels else min(1, len(labels) - 1)
-        team_b_label = st.selectbox("Opponent", labels, index=default_b_index)
-        home_team = st.radio("Home Team", [team_a_label, team_b_label])
-        prediction_context_mode = st.radio("Prediction Mode", [PREDICTION_MODE_CURRENT, PREDICTION_MODE_PLAYOFF])
+        if st.session_state.get("opponent_team_label") not in labels or st.session_state.get("opponent_team_label") == team_a_label:
+            st.session_state["opponent_team_label"] = labels[default_b_index]
+        team_b_label = st.selectbox("Opponent", labels, key="opponent_team_label")
+        if st.session_state.get("home_team_label") not in [team_a_label, team_b_label]:
+            st.session_state["home_team_label"] = team_a_label
+        home_team = st.radio("Home Team", [team_a_label, team_b_label], key="home_team_label")
+        if st.session_state.get("prediction_context_mode") not in [PREDICTION_MODE_CURRENT, PREDICTION_MODE_PLAYOFF]:
+            st.session_state["prediction_context_mode"] = PREDICTION_MODE_CURRENT
+        prediction_context_mode = st.radio("Prediction Mode", [PREDICTION_MODE_CURRENT, PREDICTION_MODE_PLAYOFF], key="prediction_context_mode")
         game_number = 1
         team_a_series_wins = 0
         team_b_series_wins = 0
@@ -1975,45 +2536,22 @@ def main() -> None:
             with game_label_col:
                 st.markdown('<div class="sidebar-inline-label">Game Number:</div>', unsafe_allow_html=True)
             with game_select_col:
-                game_number = st.selectbox("Game number", list(range(1, 8)), index=0, label_visibility="collapsed")
+                if st.session_state.get("game_number") not in list(range(1, 8)):
+                    st.session_state["game_number"] = 1
+                game_number = st.selectbox("Game number", list(range(1, 8)), label_visibility="collapsed", key="game_number")
             team_a_control_abbr = _abbr_from_label(team_a_label)
             team_b_control_abbr = _abbr_from_label(team_b_label)
             expected_series_wins = int(game_number) - 1
             team_a_win_options = valid_team_a_series_win_options(int(game_number))
-            st.markdown('<div class="sidebar-inline-label" style="line-height:1.4; margin-top:0.2rem;">Series Score:</div>', unsafe_allow_html=True)
-            score_a_name_col, score_a_col, score_dash_col, score_b_col, score_b_name_col = st.columns(
-                [0.45, 1.4, 0.18, 1.4, 0.45],
-                gap="small",
+            if st.session_state.get("team_a_series_wins") not in team_a_win_options:
+                st.session_state["team_a_series_wins"] = team_a_win_options[0]
+            team_a_series_wins = st.selectbox(
+                "Series Score",
+                team_a_win_options,
+                key="team_a_series_wins",
+                format_func=lambda wins: f"{team_a_control_abbr} {wins} - {expected_series_wins - int(wins)} {team_b_control_abbr}",
             )
-            with score_a_name_col:
-                st.markdown(
-                    f'<div class="sidebar-inline-label right">{team_a_control_abbr}</div>',
-                    unsafe_allow_html=True,
-                )
-            with score_a_col:
-                team_a_series_wins = st.selectbox(
-                    f"{team_a_control_abbr} series wins",
-                    team_a_win_options,
-                    index=0,
-                    label_visibility="collapsed",
-                )
             team_b_series_wins = expected_series_wins - int(team_a_series_wins)
-            with score_dash_col:
-                st.markdown('<div class="sidebar-inline-label center">-</div>', unsafe_allow_html=True)
-            with score_b_col:
-                team_b_series_wins = st.selectbox(
-                    f"{team_b_control_abbr} series wins",
-                    [team_b_series_wins],
-                    index=0,
-                    label_visibility="collapsed",
-                    disabled=True,
-                )
-            with score_b_name_col:
-                st.markdown(
-                    f'<div class="sidebar-inline-label">{team_b_control_abbr}</div>',
-                    unsafe_allow_html=True,
-                )
-        st.markdown("---")
         predict_clicked = st.button("Predict", type="primary")
 
     if team_a_label == team_b_label:
@@ -2048,6 +2586,7 @@ def main() -> None:
         st.session_state.pop("prediction_context", None)
         st.session_state.pop("prediction_chat_messages", None)
 
+    render_live_games_topbar_safe(model_available=model_path.exists(), labels=labels)
     render_matchup_strip(team_a, team_b, home_team, team_a_label, team_b_label, team_a_colors, team_b_colors)
 
     if predict_clicked:
@@ -2292,6 +2831,10 @@ def main() -> None:
                     width="stretch",
                     hide_index=True,
                 )
+                live_debug_rows = st.session_state.get("live_game_prediction_debug") or []
+                if live_debug_rows:
+                    st.markdown('<div class="panel-title">Live Games Prediction Debug</div>', unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(live_debug_rows), width="stretch", hide_index=True)
 
         st.markdown(
             f'<div class="saved-note">Saved prediction explanation to {PREDICTION_EXPLANATIONS_PATH}</div>',
