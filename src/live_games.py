@@ -24,12 +24,57 @@ ESPN_TIMEOUT_SECONDS = 4
 API_DELAY_SECONDS = 0.25
 SCOREBOARD_SCAN_DAYS = 10
 EASTERN_TZ = ZoneInfo("America/New_York")
+TEAM_ABBR_ALIASES = {
+    "NY": "NYK",
+    "SA": "SAS",
+    "GS": "GSW",
+    "NO": "NOP",
+    "PHO": "PHX",
+}
+TEAM_NAME_ALIASES = {
+    "new york knicks": "NYK",
+    "san antonio spurs": "SAS",
+    "golden state warriors": "GSW",
+    "new orleans pelicans": "NOP",
+    "phoenix suns": "PHX",
+}
 
 
 def nba_season_from_date(value: date | datetime | str) -> str:
     game_date = pd.to_datetime(value).date()
     start_year = game_date.year if game_date.month >= 10 else game_date.year - 1
     return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def canonical_team_abbr(source_abbr: Any, team_name: Any = "") -> str:
+    abbreviation = str(source_abbr or "").strip().upper()
+    if abbreviation in TEAM_ABBR_ALIASES:
+        return TEAM_ABBR_ALIASES[abbreviation]
+
+    normalized_name = " ".join(str(team_name or "").strip().lower().split())
+    if normalized_name in TEAM_NAME_ALIASES:
+        return TEAM_NAME_ALIASES[normalized_name]
+
+    return abbreviation
+
+
+def _team_display_name(team: dict[str, Any]) -> str:
+    for key in ("displayName", "shortDisplayName", "name"):
+        value = team.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    location = str(team.get("location") or "").strip()
+    name = str(team.get("name") or "").strip()
+    return f"{location} {name}".strip()
+
+
+def _canonicalize_series_status(value: str) -> str:
+    status = str(value or "")
+    if not status:
+        return ""
+    for source, canonical in TEAM_ABBR_ALIASES.items():
+        status = re.sub(rf"\b{re.escape(source)}\b", canonical, status, flags=re.IGNORECASE)
+    return status
 
 
 def _cache_is_fresh(path: Path, ttl_seconds: int) -> bool:
@@ -138,11 +183,11 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
         if "if necessary" in lowered or "if-necessary" in lowered:
             if_necessary = True
         if not series_status and ("leads" in lowered or "series tied" in lowered):
-            series_status = normalized
+            series_status = _canonicalize_series_status(normalized)
 
         leader_match = re.search(r"\b([A-Z]{2,4})\s+leads\s+(\d+)\s*[-–]\s*(\d+)", normalized, re.IGNORECASE)
         if leader_match and leader_wins is None:
-            leader_abbr = leader_match.group(1).upper()
+            leader_abbr = canonical_team_abbr(leader_match.group(1))
             leader_wins = int(leader_match.group(2))
             trailer_wins = int(leader_match.group(3))
             if not series_status:
@@ -153,7 +198,7 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
         if tied_match and tied_wins is None:
             tied_wins = int(tied_match.group(1))
             if not series_status:
-                series_status = f"Series tied {tied_match.group(1)}-{tied_match.group(2)}"
+                series_status = _canonicalize_series_status(f"Series tied {tied_match.group(1)}-{tied_match.group(2)}")
 
     away_wins: int | None = None
     home_wins: int | None = None
@@ -195,8 +240,10 @@ def parse_espn_scoreboard_games(payload: dict[str, Any]) -> list[dict[str, Any]]
         game_datetime = event.get("date") or competition.get("date")
         home_team = home.get("team", {}) or {}
         away_team = away.get("team", {}) or {}
-        home_abbr = str(home_team.get("abbreviation") or "")
-        away_abbr = str(away_team.get("abbreviation") or "")
+        home_source_abbr = str(home_team.get("abbreviation") or "")
+        away_source_abbr = str(away_team.get("abbreviation") or "")
+        home_abbr = canonical_team_abbr(home_source_abbr, _team_display_name(home_team))
+        away_abbr = canonical_team_abbr(away_source_abbr, _team_display_name(away_team))
         context = _series_context(event, competition, away_abbr, home_abbr)
         games.append(
             {
@@ -208,6 +255,8 @@ def parse_espn_scoreboard_games(payload: dict[str, Any]) -> list[dict[str, Any]]
                 "time_label": _format_time_label(game_datetime),
                 "home_team_id": int(home_team.get("id") or 0),
                 "away_team_id": int(away_team.get("id") or 0),
+                "home_source_abbr": home_source_abbr,
+                "away_source_abbr": away_source_abbr,
                 "home_abbr": home_abbr,
                 "away_abbr": away_abbr,
                 "home_score": _score_value(home.get("score")),

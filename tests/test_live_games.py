@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.live_games import (
     _scan_scoreboards,
+    canonical_team_abbr,
     load_live_games,
     nba_season_from_date,
     parse_espn_scoreboard_games,
@@ -18,6 +19,7 @@ from app import (
     PREDICTION_MODE_PLAYOFF,
     _upcoming_prediction_result,
     build_live_games_topbar_html,
+    get_team_colors,
     live_card_key,
     live_game_button_label,
     live_game_context_lines,
@@ -89,16 +91,80 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(games[0]["away_team_id"], 18)
         self.assertEqual(games[0]["home_team_id"], 5)
 
+    def test_espn_team_abbreviation_aliases_are_canonicalized(self):
+        cases = [
+            ("NY", "New York Knicks", "NYK"),
+            ("SA", "San Antonio Spurs", "SAS"),
+            ("GS", "Golden State Warriors", "GSW"),
+            ("NO", "New Orleans Pelicans", "NOP"),
+            ("PHO", "Phoenix Suns", "PHX"),
+        ]
+
+        for source_abbr, team_name, expected in cases:
+            with self.subTest(source_abbr=source_abbr):
+                self.assertEqual(canonical_team_abbr(source_abbr, team_name), expected)
+
+    def test_espn_team_name_alias_fallbacks_are_canonicalized(self):
+        cases = [
+            ("", "New York Knicks", "NYK"),
+            ("", "San Antonio Spurs", "SAS"),
+            ("", "Golden State Warriors", "GSW"),
+            ("", "New Orleans Pelicans", "NOP"),
+            ("", "Phoenix Suns", "PHX"),
+        ]
+
+        for source_abbr, team_name, expected in cases:
+            with self.subTest(team_name=team_name):
+                self.assertEqual(canonical_team_abbr(source_abbr, team_name), expected)
+
+    def test_parse_espn_scoreboard_canonicalizes_team_aliases(self):
+        payload = _espn_payload(
+            "401",
+            "2026-05-25T23:30Z",
+            completed=False,
+            away_abbr="NY",
+            away_id="18",
+            away_name="New York Knicks",
+            home_abbr="CLE",
+            home_id="5",
+            home_name="Cleveland Cavaliers",
+        )
+
+        games = parse_espn_scoreboard_games(payload)
+
+        self.assertEqual(games[0]["away_source_abbr"], "NY")
+        self.assertEqual(games[0]["away_abbr"], "NYK")
+        self.assertEqual(games[0]["home_abbr"], "CLE")
+
+    def test_parse_espn_scoreboard_canonicalizes_spurs_alias(self):
+        payload = _espn_payload(
+            "402",
+            "2026-05-25T23:30Z",
+            completed=False,
+            away_abbr="SA",
+            away_id="24",
+            away_name="San Antonio Spurs",
+            home_abbr="OKC",
+            home_id="25",
+            home_name="Oklahoma City Thunder",
+        )
+
+        games = parse_espn_scoreboard_games(payload)
+
+        self.assertEqual(games[0]["away_source_abbr"], "SA")
+        self.assertEqual(games[0]["away_abbr"], "SAS")
+        self.assertEqual(games[0]["home_abbr"], "OKC")
+
     def test_parse_espn_series_status_and_if_necessary(self):
         payload = _espn_payload(
             "401",
             "2026-05-25T23:30Z",
             completed=False,
-            away_abbr="NYK",
+            away_abbr="NY",
             away_id="18",
             home_abbr="CLE",
             home_id="5",
-            series_status="NYK leads 3-0",
+            series_status="NY leads 3-0",
             note="Game 4 - If Necessary",
         )
 
@@ -282,6 +348,52 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(state["game_number"], 4)
         self.assertEqual(state["team_a_series_wins"], 3)
 
+    def test_nyk_alias_upcoming_click_state_uses_canonical_team(self):
+        labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
+        game = parse_espn_scoreboard_games(
+            _espn_payload(
+                "401",
+                "2026-05-25T23:30Z",
+                completed=False,
+                away_abbr="NY",
+                away_id="18",
+                away_name="New York Knicks",
+                home_abbr="CLE",
+                home_id="5",
+                home_name="Cleveland Cavaliers",
+            )
+        )[0]
+
+        state = live_game_selection_state(live_game_payload(game), labels)
+
+        self.assertEqual(state["selected_team_label"], "New York Knicks (NYK)")
+        self.assertEqual(state["opponent_team_label"], "Cleveland Cavaliers (CLE)")
+        self.assertEqual(state["home_team_label"], "Cleveland Cavaliers (CLE)")
+
+    def test_sas_alias_click_state_uses_canonical_team(self):
+        labels = ["San Antonio Spurs (SAS)", "Oklahoma City Thunder (OKC)"]
+        game = parse_espn_scoreboard_games(
+            _espn_payload(
+                "402",
+                "2026-05-25T23:30Z",
+                completed=False,
+                away_abbr="SA",
+                away_id="24",
+                away_name="San Antonio Spurs",
+                home_abbr="OKC",
+                home_id="25",
+                home_name="Oklahoma City Thunder",
+            )
+        )[0]
+
+        payload = live_game_payload(game)
+        state = live_game_selection_state(payload, labels)
+
+        self.assertEqual(payload["away_abbr"], "SAS")
+        self.assertEqual(state["selected_team_label"], "San Antonio Spurs (SAS)")
+        self.assertEqual(state["opponent_team_label"], "Oklahoma City Thunder (OKC)")
+        self.assertEqual(state["home_team_label"], "Oklahoma City Thunder (OKC)")
+
     def test_live_game_selection_state_loads_cle_at_nyk(self):
         labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
         game = _game("402", "CLE", "NYK")
@@ -376,6 +488,53 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(prediction, "Prediction unavailable")
         self.assertIn("model unavailable", debug)
 
+    def test_upcoming_prediction_uses_canonical_alias_inputs(self):
+        captured = {}
+
+        def fake_predictor(**kwargs):
+            captured.update(kwargs)
+            return 0.61, {}, None, None, None
+
+        game = parse_espn_scoreboard_games(
+            _espn_payload(
+                "401",
+                "2026-05-25T23:30Z",
+                completed=False,
+                away_abbr="NY",
+                away_id="18",
+                away_name="New York Knicks",
+                home_abbr="CLE",
+                home_id="5",
+                home_name="Cleveland Cavaliers",
+            )
+        )[0]
+
+        prediction, debug = _upcoming_prediction_result(game, model_available=True, predictor=fake_predictor)
+
+        self.assertIsNone(debug)
+        self.assertIn("NYK", prediction)
+        self.assertEqual(captured["team_a"], "NYK")
+        self.assertEqual(captured["team_b"], "CLE")
+        self.assertEqual(captured["home_team"], "team2")
+
+    def test_sas_alias_uses_spurs_colors(self):
+        game = parse_espn_scoreboard_games(
+            _espn_payload(
+                "402",
+                "2026-05-25T23:30Z",
+                completed=False,
+                away_abbr="SA",
+                away_id="24",
+                away_name="San Antonio Spurs",
+                home_abbr="OKC",
+                home_id="25",
+                home_name="Oklahoma City Thunder",
+            )
+        )[0]
+
+        self.assertEqual(live_game_payload(game)["away_abbr"], "SAS")
+        self.assertEqual(get_team_colors(live_game_payload(game)["away_abbr"])["primary"], "#C4CED4")
+
     def test_live_game_button_label_uses_prediction_fallback_without_crashing(self):
         label, debug = live_game_button_label(_game("401", "NYK", "CLE"), is_upcoming=True, model_available=False)
 
@@ -441,7 +600,15 @@ def _espn_payload(
     home_score: str = "",
     series_status: str = "",
     note: str = "",
+    away_name: str = "",
+    home_name: str = "",
 ) -> dict:
+    away_team = {"id": away_id, "abbreviation": away_abbr}
+    home_team = {"id": home_id, "abbreviation": home_abbr}
+    if away_name:
+        away_team["displayName"] = away_name
+    if home_name:
+        home_team["displayName"] = home_name
     return {
         "events": [
             {
@@ -465,12 +632,12 @@ def _espn_payload(
                             {
                                 "homeAway": "away",
                                 "score": away_score,
-                                "team": {"id": away_id, "abbreviation": away_abbr},
+                                "team": away_team,
                             },
                             {
                                 "homeAway": "home",
                                 "score": home_score,
-                                "team": {"id": home_id, "abbreviation": home_abbr},
+                                "team": home_team,
                             },
                         ],
                     }
