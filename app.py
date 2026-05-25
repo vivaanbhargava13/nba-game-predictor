@@ -38,6 +38,11 @@ PROCESSED_DIR = Path("data/processed")
 FEATURE_IMPORTANCE_PATH = PROCESSED_DIR / "feature_importances.csv"
 PREDICTION_EXPLANATIONS_PATH = PROCESSED_DIR / "prediction_explanations.csv"
 PREDICTION_CHATS_PATH = PROCESSED_DIR / "prediction_chats.csv"
+CHAT_PROVIDER_GEMINI = "Gemini"
+CHAT_PROVIDER_OPENAI = "OpenAI"
+CHAT_PROVIDER_FALLBACK = "fallback"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-lite"
+GEMINI_QUOTA_FALLBACK_NOTICE = "Gemini quota unavailable; using fallback explanation."
 TEAM_A_COLOR = "#1F8A70"
 TEAM_B_COLOR = "#D97706"
 INK = "#172033"
@@ -426,6 +431,13 @@ def inject_dashboard_css() -> None:
     st.markdown(
         f"""
         <style>
+            header,
+            [data-testid="stHeader"] {{
+                visibility: hidden !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                background: transparent !important;
+            }}
             [data-testid="stToolbar"],
             [data-testid="stDecoration"],
             [data-testid="stStatusWidget"] {{
@@ -433,9 +445,13 @@ def inject_dashboard_css() -> None:
             }}
             [data-testid="stToolbar"]:has([data-testid="stExpandSidebarButton"]) {{
                 display: flex !important;
-                width: 3rem !important;
-                height: 3rem !important;
+                position: fixed !important;
+                top: 0 !important;
+                left: 0 !important;
+                width: 0 !important;
+                height: 0 !important;
                 background: transparent !important;
+                overflow: visible !important;
                 pointer-events: none;
             }}
             [data-testid="stToolbar"]:has([data-testid="stExpandSidebarButton"]) > * {{
@@ -2166,9 +2182,83 @@ def deterministic_initial_explanation(context: dict) -> str:
     )
 
 
-def call_openai_for_chat(system_prompt: str, messages: list[dict[str, str]]) -> str | None:
+def selected_chat_provider(environ: dict[str, str] | None = None) -> str:
+    values = environ if environ is not None else os.environ
+    if values.get("GEMINI_API_KEY"):
+        return CHAT_PROVIDER_GEMINI
+    if values.get("OPENAI_API_KEY"):
+        return CHAT_PROVIDER_OPENAI
+    return CHAT_PROVIDER_FALLBACK
+
+
+def active_chat_provider_label() -> str:
+    return selected_chat_provider()
+
+
+def gemini_model_name(environ: dict[str, str] | None = None) -> str:
+    values = environ if environ is not None else os.environ
+    return values.get("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
+
+
+def is_gemini_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in [
+            "429",
+            "quota",
+            "resource_exhausted",
+            "resource exhausted",
+            "rate limit",
+            "ratelimit",
+            "too many requests",
+        ]
+    )
+
+
+def record_chat_provider_debug(provider: str, error: Exception | str) -> dict[str, str]:
+    row = {"provider": provider, "error": str(error)}
+    try:
+        rows = list(st.session_state.get("chat_provider_debug", []))
+        rows.append(row)
+        st.session_state["chat_provider_debug"] = rows
+    except Exception:
+        pass
+    return row
+
+
+def _chat_messages_text(messages: list[dict[str, str]]) -> str:
+    lines = []
+    for message in messages:
+        role = str(message.get("role", "user")).strip() or "user"
+        content = str(message.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n\n".join(lines)
+
+
+def call_gemini_for_chat(system_prompt: str, messages: list[dict[str, str]]) -> str:
+    try:
+        from google import genai
+
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        prompt = f"{system_prompt}\n\nConversation:\n{_chat_messages_text(messages)}"
+        response = client.models.generate_content(
+            model=gemini_model_name(),
+            contents=prompt,
+        )
+        return getattr(response, "text", "") or ""
+    except Exception as exc:
+        record_chat_provider_debug(CHAT_PROVIDER_GEMINI, exc)
+        if is_gemini_quota_error(exc):
+            return GEMINI_QUOTA_FALLBACK_NOTICE
+        return f"LLM response unavailable, using deterministic fallback. Error: {exc}"
+
+
+def call_openai_for_chat(system_prompt: str, messages: list[dict[str, str]]) -> str:
     if not os.environ.get("OPENAI_API_KEY"):
-        return None
+        return ""
 
     try:
         from openai import OpenAI
@@ -2181,7 +2271,27 @@ def call_openai_for_chat(system_prompt: str, messages: list[dict[str, str]]) -> 
         )
         return response.choices[0].message.content or ""
     except Exception as exc:
+        record_chat_provider_debug(CHAT_PROVIDER_OPENAI, exc)
         return f"LLM response unavailable, using deterministic fallback. Error: {exc}"
+
+
+def call_llm_for_chat(system_prompt: str, messages: list[dict[str, str]]) -> str | None:
+    provider = selected_chat_provider()
+    if provider == CHAT_PROVIDER_GEMINI:
+        return call_gemini_for_chat(system_prompt, messages)
+    if provider == CHAT_PROVIDER_OPENAI:
+        return call_openai_for_chat(system_prompt, messages)
+    return None
+
+
+def llm_response_or_fallback(llm_response: str | None, fallback: str) -> str:
+    if llm_response is None:
+        return fallback
+    if llm_response == GEMINI_QUOTA_FALLBACK_NOTICE:
+        return f"{GEMINI_QUOTA_FALLBACK_NOTICE}\n\n{fallback}"
+    if llm_response.startswith("LLM response unavailable"):
+        return f"{llm_response}\n\n{fallback}"
+    return llm_response
 
 
 def context_system_prompt(context: dict) -> str:
@@ -2206,7 +2316,7 @@ def context_system_prompt(context: dict) -> str:
 
 def generate_initial_explanation(context: dict) -> str:
     fallback = deterministic_initial_explanation(context)
-    llm_response = call_openai_for_chat(
+    llm_response = call_llm_for_chat(
         context_system_prompt(context),
         [
             {
@@ -2219,11 +2329,7 @@ def generate_initial_explanation(context: dict) -> str:
             }
         ],
     )
-    if llm_response is None:
-        return fallback
-    if llm_response.startswith("LLM response unavailable"):
-        return f"{llm_response}\n\n{fallback}"
-    return llm_response
+    return llm_response_or_fallback(llm_response, fallback)
 
 
 def deterministic_chat_answer(context: dict, user_question: str) -> str:
@@ -2325,13 +2431,9 @@ def answer_chat_question(context: dict, chat_history: list[dict[str, str]], user
         if message.get("role") in {"user", "assistant"}
     ]
     messages.append({"role": "user", "content": user_question})
-    llm_response = call_openai_for_chat(context_system_prompt(context), messages)
+    llm_response = call_llm_for_chat(context_system_prompt(context), messages)
     fallback = deterministic_chat_answer(context, user_question)
-    if llm_response is None:
-        return fallback
-    if llm_response.startswith("LLM response unavailable"):
-        return f"{llm_response}\n\n{fallback}"
-    return llm_response
+    return llm_response_or_fallback(llm_response, fallback)
 
 
 def save_chat_transcript(context: dict, messages: list[dict[str, str]]) -> None:
@@ -2593,6 +2695,7 @@ def main() -> None:
         st.session_state.pop("prediction_payload", None)
         st.session_state.pop("prediction_context", None)
         st.session_state["prediction_chat_messages"] = []
+        st.session_state["chat_provider_debug"] = []
         if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
             try:
                 validate_series_score(int(game_number), int(team_a_series_wins), int(team_b_series_wins))
@@ -2824,6 +2927,11 @@ def main() -> None:
                 detail_a.metric("Selected features", len(feature_columns))
                 detail_b.metric("Missing values", f"{features.get('MISSING_FEATURE_COUNT', 0):.0f}")
                 detail_c.metric("Model", str(active_model_entry.get("metrics", {}).get("model", "Saved model")))
+                st.caption(f"Active chat provider: {active_chat_provider_label()}")
+                chat_debug_rows = st.session_state.get("chat_provider_debug") or []
+                if chat_debug_rows:
+                    st.markdown('<div class="panel-title">Chat Provider Debug</div>', unsafe_allow_html=True)
+                    st.dataframe(pd.DataFrame(chat_debug_rows), width="stretch", hide_index=True)
 
                 st.markdown('<div class="panel-title">Home-Court Debug</div>', unsafe_allow_html=True)
                 st.dataframe(
