@@ -185,7 +185,11 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
         if not series_status and ("leads" in lowered or "series tied" in lowered):
             series_status = _canonicalize_series_status(normalized)
 
-        leader_match = re.search(r"\b([A-Z]{2,4})\s+leads\s+(\d+)\s*[-–]\s*(\d+)", normalized, re.IGNORECASE)
+        leader_match = re.search(
+            r"\b([A-Z]{2,4})\s+leads(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
+            normalized,
+            re.IGNORECASE,
+        )
         if leader_match and leader_wins is None:
             leader_abbr = canonical_team_abbr(leader_match.group(1))
             leader_wins = int(leader_match.group(2))

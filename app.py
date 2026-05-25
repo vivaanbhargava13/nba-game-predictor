@@ -6,6 +6,7 @@ import html
 import queue
 import threading
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -250,6 +251,21 @@ def valid_team_a_series_win_options(game_number: int) -> list[int]:
     return list(range(minimum, maximum + 1))
 
 
+def series_status_text(
+    selected_abbr: str,
+    opponent_abbr: str,
+    selected_wins: int,
+    opponent_wins: int,
+) -> tuple[str, str]:
+    selected_wins = int(selected_wins)
+    opponent_wins = int(opponent_wins)
+    if selected_wins == opponent_wins:
+        return f"Series tied {selected_wins}-{opponent_wins}", "Tied"
+    if selected_wins > opponent_wins:
+        return f"{selected_abbr} leads {selected_wins}-{opponent_wins}", selected_abbr
+    return f"{opponent_abbr} leads {opponent_wins}-{selected_wins}", opponent_abbr
+
+
 def feature_importance_chart(importances: pd.DataFrame):
     top_importances = importances.dropna(subset=["importance"]).head(10).copy()
     fig, ax = plt.subplots(figsize=(9, 5.2))
@@ -285,6 +301,8 @@ NEUTRAL_FEATURE_VALUES = {
     "series_score_diff": 0.0,
 }
 
+SEMANTIC_SERIES_FEATURES = {"series_score_diff"}
+
 
 def _neutral_feature_value(feature: str) -> float:
     return NEUTRAL_FEATURE_VALUES.get(feature, 0.0)
@@ -305,6 +323,74 @@ def _feature_probability_contributions(
         neutral_probability = float(pipeline.predict_proba(neutral_frame)[0, 1])
         contributions[feature] = full_probability - neutral_probability
     return contributions
+
+
+def game_win_prediction_features(
+    features: dict[str, float],
+    prediction_context_mode: str,
+) -> dict[str, float]:
+    """Return feature values used for game-win prediction.
+
+    The actual series score is semantic context for the series outcome and chat/debug.
+    It should not act as a learned single-game win factor.
+    """
+    game_features = dict(features)
+    if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
+        game_features["series_score_diff"] = 0.0
+    return game_features
+
+
+def predict_probability_from_features(pipeline, features: dict[str, float], feature_columns: list[str]) -> float:
+    feature_frame = pd.DataFrame([features], columns=feature_columns)
+    return float(pipeline.predict_proba(feature_frame)[0, 1])
+
+
+@lru_cache(maxsize=None)
+def _series_probability_from_score(game_win_probability: float, selected_wins: int, opponent_wins: int) -> float:
+    if selected_wins >= 4:
+        return 1.0
+    if opponent_wins >= 4:
+        return 0.0
+    return (
+        game_win_probability * _series_probability_from_score(game_win_probability, selected_wins + 1, opponent_wins)
+        + (1.0 - game_win_probability)
+        * _series_probability_from_score(game_win_probability, selected_wins, opponent_wins + 1)
+    )
+
+
+def simulate_best_of_seven_series_probability(
+    game_win_probability: float,
+    selected_wins: int,
+    opponent_wins: int,
+) -> float:
+    """Estimate selected team's series win probability from current score.
+
+    Uses the current single-game win probability as a simple constant baseline for
+    each remaining game in the best-of-7 series.
+    """
+    p = max(0.0, min(1.0, float(game_win_probability)))
+    return float(_series_probability_from_score(round(p, 6), int(selected_wins), int(opponent_wins)))
+
+
+def apply_semantic_series_factor_direction(factors: pd.DataFrame) -> pd.DataFrame:
+    """Make semantic series-score direction deterministic if it appears in a table."""
+    if factors.empty or "feature" not in factors.columns or "pushes_toward" not in factors.columns:
+        return factors
+    adjusted = factors.copy()
+    mask = adjusted["feature"].eq("series_score_diff")
+    if not mask.any():
+        return adjusted
+
+    def direction(value) -> str:
+        numeric = float(value or 0.0)
+        if numeric > 0:
+            return "Team A"
+        if numeric < 0:
+            return "Team B"
+        return "Tied"
+
+    adjusted.loc[mask, "pushes_toward"] = adjusted.loc[mask, "value"].apply(direction)
+    return adjusted
 
 
 def local_factor_table(
@@ -330,6 +416,7 @@ def local_factor_table(
         factors["signed_contribution"] = factors["value"] * factors["importance"]
     factors["pushes_toward"] = factors["signed_contribution"].apply(lambda value: "Team A" if value >= 0 else "Team B")
     factors["abs_contribution"] = factors["signed_contribution"].abs()
+    factors = apply_semantic_series_factor_direction(factors)
     return factors.sort_values("abs_contribution", ascending=False).reset_index(drop=True)
 
 
@@ -388,6 +475,7 @@ def display_feature_frame(
     team_b_abbreviation: str,
 ) -> pd.DataFrame:
     view = feature_frame.copy()
+    view = view.drop(columns=[column for column in SEMANTIC_SERIES_FEATURES if column in view.columns])
     if "home_team_A" in view.columns:
         view = view.rename(columns={"home_team_A": "home_team"})
         view["home_team"] = team_a_abbreviation if float(features.get("home_team_A", 0) or 0) == 1.0 else team_b_abbreviation
@@ -419,11 +507,12 @@ def filter_explanation_features_for_mode(
     importances: pd.DataFrame,
     prediction_context_mode: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if prediction_context_mode != "Current Hypothetical":
-        return factors, importances
+    excluded_features = set(SEMANTIC_SERIES_FEATURES)
+    if prediction_context_mode == "Current Hypothetical":
+        excluded_features.update(SERIES_CONTEXT_FEATURES)
     return (
-        factors[~factors["feature"].isin(SERIES_CONTEXT_FEATURES)].reset_index(drop=True),
-        importances[~importances["feature"].isin(SERIES_CONTEXT_FEATURES)].reset_index(drop=True),
+        factors[~factors["feature"].isin(excluded_features)].reset_index(drop=True),
+        importances[~importances["feature"].isin(excluded_features)].reset_index(drop=True),
     )
 
 
@@ -512,6 +601,9 @@ def inject_dashboard_css() -> None:
             [data-testid="stSidebar"] {{
                 background: #FFFFFF;
                 border-right: 1px solid var(--line);
+            }}
+            [data-testid="stSidebarContent"] {{
+                padding-top: 0.35rem !important;
             }}
             [data-testid="stSidebar"] h2,
             [data-testid="stSidebar"] label {{
@@ -1421,6 +1513,7 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
         "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
         "game_number": game_number,
         "team_a_series_wins": team_a_series_wins,
+        "raw_live_game_series_label": str(game.get("series_status") or ""),
     }
 
 
@@ -1605,6 +1698,7 @@ def render_probability_summary(
     team_b_display: str,
     team_a_probability: float,
     home_team: str,
+    title: str = "Game Win Probability",
 ) -> None:
     team_b_probability = 1 - team_a_probability
     a_width = max(0, min(100, team_a_probability * 100))
@@ -1612,6 +1706,7 @@ def render_probability_summary(
     st.markdown(
         f"""
         <div class="panel">
+            <div class="panel-title">{title}</div>
             <div class="prob-meter">
                 <div class="prob-meter-a" style="width:{a_width:.2f}%"></div>
                 <div class="prob-meter-b" style="width:{b_width:.2f}%"></div>
@@ -1623,6 +1718,20 @@ def render_probability_summary(
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def render_series_probability_summary(
+    team_a_display: str,
+    team_b_display: str,
+    team_a_series_probability: float,
+) -> None:
+    render_probability_summary(
+        team_a_display,
+        team_b_display,
+        team_a_series_probability,
+        home_team="",
+        title="Series Win Probability",
     )
 
 
@@ -1738,6 +1847,7 @@ FEATURE_MEANINGS = {
     "last_10_win_pct_diff": "Last-ten win percentage captures a broader recent-form window.",
     "top_3_ppg_diff": "Top-three scorer production estimates how much high-end scoring punch each team has.",
     "rest_days_diff": "Rest-days difference captures whether one team has had more time off before the game.",
+    "series_score_diff": "Series score is selected team wins minus opponent wins before this game. It is semantic series context, not a normal game-win factor: positive means selected team leads, negative means opponent leads, and zero means tied.",
 }
 
 
@@ -1764,6 +1874,20 @@ def factor_basketball_sentence(row: dict | pd.Series, context: dict) -> str:
     side = factor_helped_side(row) or "Team A"
     team = team_chat_name(context, side)
 
+    actual_series_status = str(context.get("series_status_text") or "").strip()
+    series_score_value = float(context.get("series_score_diff") or 0.0)
+    if series_score_value > 0:
+        deterministic_series_direction = team_chat_name(context, "Team A")
+    elif series_score_value < 0:
+        deterministic_series_direction = team_chat_name(context, "Team B")
+    else:
+        deterministic_series_direction = "neither team"
+    series_description = (
+        f"The series score context points toward {deterministic_series_direction}. "
+        f"The actual series status is {actual_series_status}."
+        if actual_series_status
+        else f"The series score context points toward {deterministic_series_direction}."
+    )
     descriptions = {
         "OFF_RATING_DIFF": f"Offensive rating helped {team} in this model read. Offensive rating is points scored per 100 possessions.",
         "DEF_RATING_DIFF": f"Defensive rating helped {team} in this model read. Defensive rating is points allowed per 100 possessions, but this direction comes from the model contribution rather than a raw-value rule.",
@@ -1782,7 +1906,7 @@ def factor_basketball_sentence(row: dict | pd.Series, context: dict) -> str:
         "away_win_pct_diff": f"The opposite home/away split helped {team} in this model read.",
         "season_h2h_win_pct_diff": f"Same-season head-to-head results helped {team} in this model read.",
         "season_h2h_margin_diff": f"Head-to-head scoring margin helped {team} in this model read.",
-        "series_score_diff": f"The current series score context helped {team} in this model read.",
+        "series_score_diff": series_description,
         "last_5_win_pct_diff": f"Recent form over the last five games helped {team} in this model read.",
         "last_10_win_pct_diff": f"Recent form over the last ten games helped {team} in this model read.",
         "last_5_net_rating_diff": f"Short-term net rating over the last five games helped {team} in this model read.",
@@ -1794,6 +1918,80 @@ def factor_basketball_sentence(row: dict | pd.Series, context: dict) -> str:
         "rest_days_diff": f"The rest situation helped {team} in this model read.",
     }
     return descriptions.get(feature, f"{basketball_feature_label(feature).capitalize()} helped {team} in this model read.")
+
+
+def series_context_sentence(context: dict) -> str:
+    if context.get("prediction_context_mode") != PREDICTION_MODE_PLAYOFF:
+        return ""
+    game_number = int(context.get("user_series_context", {}).get("game_number", 1) or 1)
+    status = str(context.get("series_status_text") or "").strip()
+    home_team_text = str(context.get("home_team", ""))
+    team_a_abbr = str(context["team_a"]["abbreviation"])
+    team_b_abbr = str(context["team_b"]["abbreviation"])
+    if team_a_abbr in home_team_text:
+        home_side = "Team A"
+    elif team_b_abbr in home_team_text:
+        home_side = "Team B"
+    else:
+        home_side = "Team A" if "(Home)" in str(context.get("team_a", {}).get("display", "")) else "Team B"
+    away_side = other_side(home_side)
+    away = context["team_a"]["abbreviation"] if away_side == "Team A" else context["team_b"]["abbreviation"]
+    home = context["team_a"]["abbreviation"] if home_side == "Team A" else context["team_b"]["abbreviation"]
+    if not status:
+        return f"Series context: unavailable. This prediction is for Game {game_number}: {away} away at {home} home."
+    return f"Series context: {status}. This prediction is for Game {game_number}: {away} away at {home} home."
+
+
+def text_contradicts_series_status(text: str, context: dict) -> bool:
+    status = str(context.get("series_status_text") or "")
+    if not status:
+        return False
+    lowered = str(text or "").lower()
+    team_a = context["team_a"]
+    team_b = context["team_b"]
+    team_phrases = {
+        team_a["abbreviation"]: [
+            str(team_a["abbreviation"]).lower(),
+            str(team_a["name"]).lower(),
+            str(team_a["name"]).split()[0].lower(),
+            str(team_a["name"]).split()[-1].lower(),
+        ],
+        team_b["abbreviation"]: [
+            str(team_b["abbreviation"]).lower(),
+            str(team_b["name"]).lower(),
+            str(team_b["name"]).split()[0].lower(),
+            str(team_b["name"]).split()[-1].lower(),
+        ],
+    }
+    tied = "series tied" in status.lower()
+    if tied:
+        return any(
+            f"{phrase} leads" in lowered
+            or f"{phrase} leading" in lowered
+            or f"{phrase} is leading" in lowered
+            or f"{phrase} are leading" in lowered
+            or f"{phrase} holding a series lead" in lowered
+            or f"{phrase} holds a series lead" in lowered
+            for phrases in team_phrases.values()
+            for phrase in phrases
+        )
+
+    leader = str(context.get("series_leader") or "").upper()
+    non_leader_phrases = [
+        phrase
+        for abbreviation, phrases in team_phrases.items()
+        if abbreviation.upper() != leader
+        for phrase in phrases
+    ]
+    return any(
+        f"{phrase} leads" in lowered
+        or f"{phrase} leading" in lowered
+        or f"{phrase} is leading" in lowered
+        or f"{phrase} are leading" in lowered
+        or f"{phrase} holding a series lead" in lowered
+        or f"{phrase} holds a series lead" in lowered
+        for phrase in non_leader_phrases
+    )
 
 
 def factor_lines_for_side(context: dict, side: str, limit: int = 5) -> list[str]:
@@ -2080,13 +2278,16 @@ def build_prediction_context(
     importances: pd.DataFrame,
     model_bundle: dict,
     feature_columns: list[str],
+    team_a_series_probability: float | None = None,
     home_debug_rows: list[dict] | None = None,
     prediction_context_mode: str = "Current Hypothetical",
     game_number: int = 1,
     team_a_series_wins: int = 0,
     team_b_series_wins: int = 0,
+    raw_live_game_series_label: str = "",
 ) -> dict:
     team_b_probability = 1 - team_a_probability
+    team_b_series_probability = None if team_a_series_probability is None else 1 - team_a_series_probability
     if team_a_probability >= team_b_probability:
         favorite_key = "team_a"
         favorite_name = team_a_display
@@ -2106,18 +2307,44 @@ def build_prediction_context(
     underdog_factors = top_factors[top_factors["pushes_toward"].eq(underdog_side)].head(5)
 
     clean_features = {column: None if pd.isna(features.get(column)) else float(features.get(column)) for column in feature_columns}
+    selected_abbr = str(team_a["TEAM_ABBREVIATION"])
+    opponent_abbr = str(team_b["TEAM_ABBREVIATION"])
+    selected_team_series_wins = int(team_a_series_wins)
+    opponent_series_wins = int(team_b_series_wins)
+    computed_series_score_diff = selected_team_series_wins - opponent_series_wins
+    series_text, series_leader = series_status_text(
+        selected_abbr,
+        opponent_abbr,
+        selected_team_series_wins,
+        opponent_series_wins,
+    )
+    if prediction_context_mode == PREDICTION_MODE_CURRENT:
+        series_text = "Series tied 0-0"
+        series_leader = "Tied"
     return {
         "season": season,
         "season_type": season_type,
         "prediction_date": prediction_date.isoformat(),
         "home_team": home_team,
         "prediction_context_mode": prediction_context_mode,
+        "selected_team": selected_abbr,
+        "opponent": opponent_abbr,
+        "selected_team_series_wins": selected_team_series_wins,
+        "opponent_series_wins": opponent_series_wins,
+        "series_score_diff": computed_series_score_diff,
+        "series_leader": series_leader,
+        "series_status_text": series_text,
+        "raw_live_game_series_label": raw_live_game_series_label,
         "user_series_context": {
             "game_number": int(game_number),
-            "team_a_series_wins": int(team_a_series_wins),
-            "team_b_series_wins": int(team_b_series_wins),
-            "series_score_diff": int(team_a_series_wins) - int(team_b_series_wins),
-            "elimination_game": int(team_a_series_wins == 3 or team_b_series_wins == 3),
+            "team_a_series_wins": selected_team_series_wins,
+            "team_b_series_wins": opponent_series_wins,
+            "selected_team_series_wins": selected_team_series_wins,
+            "opponent_series_wins": opponent_series_wins,
+            "series_score_diff": computed_series_score_diff,
+            "series_leader": series_leader,
+            "series_status_text": series_text,
+            "elimination_game": int(selected_team_series_wins == 3 or opponent_series_wins == 3),
         },
         "team_a": {
             "label": team_a_label,
@@ -2125,6 +2352,9 @@ def build_prediction_context(
             "name": str(team_a["TEAM_NAME"]),
             "abbreviation": str(team_a["TEAM_ABBREVIATION"]),
             "win_probability": float(team_a_probability),
+            "series_win_probability": None
+            if team_a_series_probability is None
+            else float(team_a_series_probability),
         },
         "team_b": {
             "label": team_b_label,
@@ -2132,6 +2362,9 @@ def build_prediction_context(
             "name": str(team_b["TEAM_NAME"]),
             "abbreviation": str(team_b["TEAM_ABBREVIATION"]),
             "win_probability": float(team_b_probability),
+            "series_win_probability": None
+            if team_b_series_probability is None
+            else float(team_b_series_probability),
         },
         "favorite": {
             "side": favorite_key,
@@ -2141,6 +2374,29 @@ def build_prediction_context(
         },
         "underdog": {"display": underdog_name},
         "confidence": confidence_label(margin),
+        "series": {
+            "team_a_series_win_probability": None
+            if team_a_series_probability is None
+            else float(team_a_series_probability),
+            "team_b_series_win_probability": None
+            if team_b_series_probability is None
+            else float(team_b_series_probability),
+            "favorite": None
+            if team_a_series_probability is None
+            else (
+                {
+                    "side": "team_a",
+                    "display": team_a_display,
+                    "win_probability": float(team_a_series_probability),
+                }
+                if team_a_series_probability >= 0.5
+                else {
+                    "side": "team_b",
+                    "display": team_b_display,
+                    "win_probability": float(1 - team_a_series_probability),
+                }
+            ),
+        },
         "feature_values": clean_features,
         "top_factors": top_factors.to_dict(orient="records"),
         "favorite_factors": favorite_factors.to_dict(orient="records"),
@@ -2165,21 +2421,52 @@ def deterministic_initial_explanation(context: dict) -> str:
     if not underdog_lines:
         underdog_lines = ["The underdog does not have many top-ranked factors in this particular model read, but basketball outcomes can still swing on shooting variance, matchup execution, and late-game possessions."]
 
-    return "\n".join(
-        [
-            "**Overall read**",
-            f"The model favors {favorite_name} at {favorite['win_probability']:.1%}. That is a {favorite['margin_pp']:.1f}-point probability edge over {underdog_name}.",
-            "",
-            "**Why the favorite is favored**",
-            *[f"- {line}" for line in favorite_lines[:5]],
-            "",
-            "**What keeps the underdog competitive**",
-            *[f"- {line}" for line in underdog_lines[:3]],
-            "",
-            "**Confidence/limitations**",
-            f"Confidence is {context['confidence'].lower()}. This is a model-based read from team strength, form, home-court, efficiency, seeding, rest, and context features. The app does not include injuries, lineup news, trades, or other real-world updates outside the dataset.",
-        ]
+    game_read = (
+        f"The model favors {favorite_name} to win this game at {favorite['win_probability']:.1%}. "
+        f"That is a {favorite['margin_pp']:.1f}-point game-probability edge over {underdog_name}."
     )
+    series_context = context.get("series") or {}
+    series_favorite = series_context.get("favorite")
+    if series_favorite:
+        series_side = "Team A" if series_favorite.get("side") == "team_a" else "Team B"
+        series_favorite_name = team_chat_name(context, series_side)
+        game_read += (
+            f" Separately, {series_favorite_name} is favored to win the series at "
+            f"{float(series_favorite['win_probability']):.1%}."
+        )
+
+    sections = [
+        "**Overall read**",
+        game_read,
+        "",
+        "**Why the favorite is favored**",
+        *[f"- {line}" for line in favorite_lines[:5]],
+        "",
+        "**What keeps the underdog competitive**",
+        *[f"- {line}" for line in underdog_lines[:3]],
+        "",
+        "**Confidence/limitations**",
+        f"Confidence is {context['confidence'].lower()}. This is a model-based read from team strength, form, home-court, efficiency, seeding, rest, and context features. The app does not include injuries, lineup news, trades, or other real-world updates outside the dataset.",
+    ]
+    fixed_series_sentence = series_context_sentence(context)
+    if fixed_series_sentence:
+        sections = [fixed_series_sentence, ""] + sections
+    return "\n".join(sections)
+
+
+def deterministic_initial_explanation_body(context: dict) -> str:
+    explanation = deterministic_initial_explanation(context)
+    fixed_series_sentence = series_context_sentence(context)
+    if fixed_series_sentence and explanation.startswith(fixed_series_sentence):
+        return explanation[len(fixed_series_sentence):].lstrip()
+    return explanation
+
+
+def compose_initial_explanation(context: dict, explanation_body: str) -> str:
+    fixed_series_sentence = series_context_sentence(context)
+    if fixed_series_sentence:
+        return f"{fixed_series_sentence}\n\n{explanation_body.strip()}"
+    return explanation_body.strip()
 
 
 def selected_chat_provider(environ: dict[str, str] | None = None) -> str:
@@ -2294,6 +2581,17 @@ def llm_response_or_fallback(llm_response: str | None, fallback: str) -> str:
     return llm_response
 
 
+def validated_llm_response_or_fallback(llm_response: str | None, fallback: str, context: dict) -> str:
+    response = llm_response_or_fallback(llm_response, fallback)
+    if text_contradicts_series_status(response, context):
+        record_chat_provider_debug(
+            "Series grounding",
+            f"Discarded generated chat because it contradicted series_status_text={context.get('series_status_text')!r}: {response}",
+        )
+        return fallback
+    return response
+
+
 def context_system_prompt(context: dict) -> str:
     team_a_name = f"{context['team_a']['name']} ({context['team_a']['abbreviation']})"
     team_b_name = f"{context['team_b']['name']} ({context['team_b']['abbreviation']})"
@@ -2305,6 +2603,10 @@ def context_system_prompt(context: dict) -> str:
         "In user-visible text, use actual team names or abbreviations and never say Team A or Team B. "
         "Use concise basketball language. Do not write raw feature values like 'value -3.200' or 'negative edge.' "
         "For feature direction, only use each factor's pushes_toward field and signed_contribution; never infer which team a feature helped from the raw feature value. "
+        "For playoff series context, use series_status_text, selected_team_series_wins, opponent_series_wins, series_leader, and series win probabilities as the source of truth. "
+        "Do not infer the series leader from home team, favorite, pushes_toward, or raw feature signs. "
+        "series_score_diff is semantic context only: positive means the selected team leads the series, negative means the opponent leads, and zero means tied. "
+        "Always distinguish game win probability from series win probability. "
         "Every answer must directly answer the user's question using this matchup context; do not give generic suggestions for what to ask next. "
         "For strength-comparison questions, compare probability edge, important model factors, and confidence. "
         "For home-court questions, use home_scenarios when available. "
@@ -2315,7 +2617,7 @@ def context_system_prompt(context: dict) -> str:
 
 
 def generate_initial_explanation(context: dict) -> str:
-    fallback = deterministic_initial_explanation(context)
+    fallback_body = deterministic_initial_explanation_body(context)
     llm_response = call_llm_for_chat(
         context_system_prompt(context),
         [
@@ -2329,7 +2631,8 @@ def generate_initial_explanation(context: dict) -> str:
             }
         ],
     )
-    return llm_response_or_fallback(llm_response, fallback)
+    explanation_body = validated_llm_response_or_fallback(llm_response, fallback_body, context)
+    return compose_initial_explanation(context, explanation_body)
 
 
 def deterministic_chat_answer(context: dict, user_question: str) -> str:
@@ -2433,7 +2736,7 @@ def answer_chat_question(context: dict, chat_history: list[dict[str, str]], user
     messages.append({"role": "user", "content": user_question})
     llm_response = call_llm_for_chat(context_system_prompt(context), messages)
     fallback = deterministic_chat_answer(context, user_question)
-    return llm_response_or_fallback(llm_response, fallback)
+    return validated_llm_response_or_fallback(llm_response, fallback, context)
 
 
 def save_chat_transcript(context: dict, messages: list[dict[str, str]]) -> None:
@@ -2460,12 +2763,13 @@ def save_chat_transcript(context: dict, messages: list[dict[str, str]]) -> None:
 
 
 def render_chat_panel(context: dict) -> None:
+    message_count = len(st.session_state.get("prediction_chat_messages", []))
     bubble_html = [
-        """
+        f"""
         <div class="chat-panel">
             <div class="chat-panel-title">Prediction Chat</div>
             <div class="chat-panel-note">Ask follow-ups about this matchup using only the current model context.</div>
-            <div class="chat-history">
+            <div id="prediction-chat-history" class="chat-history" data-chat-message-count="{message_count}">
                 <div class="chat-stream">
         """
     ]
@@ -2475,22 +2779,52 @@ def render_chat_panel(context: dict) -> None:
         bubble_html.append(
             f'<div class="chat-row {role}"><div class="chat-bubble {role}">{content}</div></div>'
         )
-    bubble_html.append('<div id="chat-bottom-anchor"></div></div></div></div>')
+    bubble_html.append('<div id="prediction-chat-bottom-anchor"></div></div></div></div>')
     st.markdown("".join(bubble_html), unsafe_allow_html=True)
-    components.html(
-        """
+    chat_scroll_script = """
         <script>
-            const scrollChatHistory = () => {
-                const histories = window.parent.document.querySelectorAll('.chat-history');
-                const history = histories[histories.length - 1];
+            (() => {
+                const expectedMessageCount = __MESSAGE_COUNT__;
+                const latestVisibleChatHistory = () => {
+                    const doc = window.parent.document;
+                    const histories = Array.from(
+                        doc.querySelectorAll('#prediction-chat-history, .chat-history[data-chat-message-count]')
+                    );
+                    const visibleHistories = histories.filter((history) => {
+                        const rect = history.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    });
+                    return visibleHistories[visibleHistories.length - 1] || histories[histories.length - 1] || null;
+                };
+                const scrollChatHistory = () => {
+                    const history = latestVisibleChatHistory();
+                    if (!history) {
+                        return;
+                    }
+                    if (history.dataset.chatMessageCount !== String(expectedMessageCount)) {
+                        return;
+                    }
+                    const maxScrollTop = history.scrollHeight - history.clientHeight;
+                    if (maxScrollTop > 0) {
+                        history.scrollTop = maxScrollTop;
+                        history.scrollTo({ top: maxScrollTop, behavior: 'auto' });
+                    }
+                };
+                window.requestAnimationFrame(scrollChatHistory);
+                [40, 120, 260, 520, 900, 1400, 2000].forEach((delay) => {
+                    window.setTimeout(scrollChatHistory, delay);
+                });
+                const history = latestVisibleChatHistory();
                 if (history) {
-                    history.scrollTop = history.scrollHeight;
+                    const observer = new MutationObserver(scrollChatHistory);
+                    observer.observe(history, { childList: true, subtree: true });
+                    window.setTimeout(() => observer.disconnect(), 2200);
                 }
-            };
-            window.requestAnimationFrame(scrollChatHistory);
-            window.setTimeout(scrollChatHistory, 120);
+            })();
         </script>
-        """,
+        """.replace("__MESSAGE_COUNT__", str(message_count))
+    components.html(
+        chat_scroll_script,
         height=0,
     )
 
@@ -2718,7 +3052,7 @@ def main() -> None:
     if predict_clicked:
         try:
             alternate_home_team_arg = "team2" if home_team_arg == "team1" else "team1"
-            team_a_probability, features, _, _, _ = _predict_probability(
+            raw_team_a_probability, features, _, _, _ = _predict_probability(
                 team_a=str(team_a["TEAM_ABBREVIATION"]),
                 team_b=str(team_b["TEAM_ABBREVIATION"]),
                 season=season,
@@ -2733,9 +3067,23 @@ def main() -> None:
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
             )
+            game_features = game_win_prediction_features(features, prediction_context_mode)
+            team_a_probability = predict_probability_from_features(
+                active_model_entry["pipeline"],
+                game_features,
+                feature_columns,
+            )
         except Exception as exc:
             st.error(f"Could not run prediction: {exc}")
             st.stop()
+
+        team_a_series_probability = None
+        if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
+            team_a_series_probability = simulate_best_of_seven_series_probability(
+                team_a_probability,
+                int(team_a_series_wins),
+                int(team_b_series_wins),
+            )
 
         home_debug_rows = [
             {
@@ -2752,7 +3100,7 @@ def main() -> None:
             }
         ]
         try:
-            alternate_probability, alternate_features, _, _, _ = _predict_probability(
+            _alternate_raw_probability, alternate_features, _, _, _ = _predict_probability(
                 team_a=str(team_a["TEAM_ABBREVIATION"]),
                 team_b=str(team_b["TEAM_ABBREVIATION"]),
                 season=season,
@@ -2766,6 +3114,12 @@ def main() -> None:
                 game_number=int(game_number),
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
+            )
+            alternate_game_features = game_win_prediction_features(alternate_features, prediction_context_mode)
+            alternate_probability = predict_probability_from_features(
+                active_model_entry["pipeline"],
+                alternate_game_features,
+                feature_columns,
             )
             home_debug_rows.append(
                 {
@@ -2796,18 +3150,18 @@ def main() -> None:
                 }
             )
 
-        feature_frame = pd.DataFrame([features], columns=feature_columns)
+        feature_frame = pd.DataFrame([game_features], columns=feature_columns)
         print("Final feature row before prediction:")
         print(
             json.dumps(
-                {column: None if pd.isna(features.get(column)) else float(features.get(column)) for column in feature_columns},
+                {column: None if pd.isna(game_features.get(column)) else float(game_features.get(column)) for column in feature_columns},
                 indent=2,
                 sort_keys=True,
             )
         )
         importances = load_feature_importances(active_model_entry, feature_columns, prediction_context_mode)
         factors = local_factor_table(
-            features,
+            game_features,
             importances,
             feature_columns,
             pipeline=active_model_entry["pipeline"],
@@ -2828,7 +3182,7 @@ def main() -> None:
             team_b_label=team_b_display,
             home_team=home_team,
             team_a_probability=team_a_probability,
-            features={column: features.get(column) for column in feature_columns},
+            features={column: game_features.get(column) for column in feature_columns},
             factors=explanation_factors,
             importances=explanation_importances,
         )
@@ -2845,7 +3199,8 @@ def main() -> None:
             team_a_display=team_a_display,
             team_b_display=team_b_display,
             team_a_probability=team_a_probability,
-            features=features,
+            team_a_series_probability=team_a_series_probability,
+            features=game_features,
             factors=explanation_factors,
             importances=explanation_importances,
             model_bundle=active_model_entry,
@@ -2855,6 +3210,7 @@ def main() -> None:
             game_number=int(game_number),
             team_a_series_wins=int(team_a_series_wins),
             team_b_series_wins=int(team_b_series_wins),
+            raw_live_game_series_label=str(st.session_state.get("raw_live_game_series_label", "")),
         )
         initial_message = generate_initial_explanation(context)
         st.session_state["prediction_chat_messages"] = [{"role": "assistant", "content": initial_message}]
@@ -2863,7 +3219,9 @@ def main() -> None:
         st.session_state["prediction_context"] = context
         st.session_state["prediction_payload"] = {
             "team_a_probability": team_a_probability,
+            "team_a_series_probability": team_a_series_probability,
             "features": features,
+            "game_features": game_features,
             "feature_frame": feature_frame,
             "factors": factors,
             "importances": importances,
@@ -2877,7 +3235,9 @@ def main() -> None:
     payload = st.session_state["prediction_payload"]
     context = st.session_state["prediction_context"]
     team_a_probability = payload["team_a_probability"]
+    team_a_series_probability = payload.get("team_a_series_probability")
     features = payload["features"]
+    game_features = payload.get("game_features", features)
     feature_frame = payload["feature_frame"]
     factors = payload["factors"]
     importances = payload["importances"]
@@ -2892,6 +3252,8 @@ def main() -> None:
     result_col, chat_col = st.columns([1.65, 1], gap="large")
     with result_col:
         render_probability_summary(team_a_display, team_b_display, team_a_probability, home_team)
+        if prediction_context_mode == PREDICTION_MODE_PLAYOFF and team_a_series_probability is not None:
+            render_series_probability_summary(team_a_display, team_b_display, team_a_series_probability)
         render_prediction_summary(team_a_display, team_b_display, team_a_probability)
 
         st.markdown('<div class="panel-title">Why this prediction?</div>', unsafe_allow_html=True)
@@ -2932,6 +3294,29 @@ def main() -> None:
                 if chat_debug_rows:
                     st.markdown('<div class="panel-title">Chat Provider Debug</div>', unsafe_allow_html=True)
                     st.dataframe(pd.DataFrame(chat_debug_rows), width="stretch", hide_index=True)
+
+                st.markdown('<div class="panel-title">Series Context Debug</div>', unsafe_allow_html=True)
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "selected_team": context.get("selected_team"),
+                                "opponent": context.get("opponent"),
+                                "home_team": _abbr_from_label(str(context.get("home_team", ""))),
+                                "selected_team_series_wins": context.get("selected_team_series_wins"),
+                                "opponent_series_wins": context.get("opponent_series_wins"),
+                                "series_score_diff": context.get("series_score_diff"),
+                                "series_status_text": context.get("series_status_text"),
+                                "selected_team_series_win_probability": (
+                                    context.get("series", {}).get("team_a_series_win_probability")
+                                ),
+                                "raw_live_game_series_label": context.get("raw_live_game_series_label", ""),
+                            }
+                        ]
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
 
                 st.markdown('<div class="panel-title">Home-Court Debug</div>', unsafe_allow_html=True)
                 st.dataframe(

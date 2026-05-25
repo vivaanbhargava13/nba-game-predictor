@@ -176,6 +176,62 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(games[0]["home_series_wins"], 0)
         self.assertEqual(games[0]["game_number"], 4)
 
+    def test_parse_espn_leads_series_phrase_sets_click_context(self):
+        labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
+        payload = _espn_payload(
+            "401",
+            "2026-05-25T23:30Z",
+            completed=False,
+            away_abbr="NY",
+            away_id="18",
+            away_name="New York Knicks",
+            home_abbr="CLE",
+            home_id="5",
+            home_name="Cleveland Cavaliers",
+            series_status="NY leads series 3-0",
+        )
+
+        game = parse_espn_scoreboard_games(payload)[0]
+        state = live_game_selection_state(live_game_payload(game), labels)
+
+        self.assertEqual(game["series_status"], "NYK leads series 3-0")
+        self.assertEqual(game["away_series_wins"], 3)
+        self.assertEqual(game["home_series_wins"], 0)
+        self.assertEqual(game["game_number"], 4)
+        self.assertEqual(state["selected_team_label"], "New York Knicks (NYK)")
+        self.assertEqual(state["opponent_team_label"], "Cleveland Cavaliers (CLE)")
+        self.assertEqual(state["home_team_label"], "Cleveland Cavaliers (CLE)")
+        self.assertEqual(state["game_number"], 4)
+        self.assertEqual(state["team_a_series_wins"], 3)
+
+    def test_parse_espn_series_tied_sets_click_context(self):
+        labels = ["San Antonio Spurs (SAS)", "Oklahoma City Thunder (OKC)"]
+        payload = _espn_payload(
+            "402",
+            "2026-05-25T23:30Z",
+            completed=False,
+            away_abbr="SA",
+            away_id="24",
+            away_name="San Antonio Spurs",
+            home_abbr="OKC",
+            home_id="25",
+            home_name="Oklahoma City Thunder",
+            series_status="Series tied 2-2",
+        )
+
+        game = parse_espn_scoreboard_games(payload)[0]
+        state = live_game_selection_state(live_game_payload(game), labels)
+
+        self.assertEqual(game["series_status"], "Series tied 2-2")
+        self.assertEqual(game["away_series_wins"], 2)
+        self.assertEqual(game["home_series_wins"], 2)
+        self.assertEqual(game["game_number"], 5)
+        self.assertEqual(state["selected_team_label"], "San Antonio Spurs (SAS)")
+        self.assertEqual(state["opponent_team_label"], "Oklahoma City Thunder (OKC)")
+        self.assertEqual(state["home_team_label"], "Oklahoma City Thunder (OKC)")
+        self.assertEqual(state["game_number"], 5)
+        self.assertEqual(state["team_a_series_wins"], 2)
+
     def test_live_games_falls_back_to_empty_payload_without_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("src.live_games._scan_scoreboards", side_effect=RuntimeError("api down")):

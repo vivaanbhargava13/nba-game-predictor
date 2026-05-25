@@ -27,7 +27,7 @@ WEIGHTED_RECENT_FEATURES = [
     "weighted_recent_def_rating_diff",
 ]
 SEED_DIRECTION_FEATURES = ["seed_difference", "higher_seed_A"]
-SERIES_CONTEXT_FEATURES = ["game_number", "series_score_diff", "elimination_game"]
+SERIES_CONTEXT_FEATURES = ["game_number", "elimination_game"]
 PRODUCTION_FEATURE_SET_NAME = "baseline_plus_corrected_signs"
 OLD_HOME_SPLIT_FEATURES = ["home_team_A", "home_win_pct_diff", "away_win_pct_diff"]
 ONLY_HOME_TEAM_FEATURES = ["home_team_A"]

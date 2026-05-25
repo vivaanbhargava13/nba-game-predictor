@@ -65,6 +65,34 @@ class ExplainabilityDirectionTests(unittest.TestCase):
         self.assertEqual(filtered_factors["feature"].tolist(), ["OFF_RATING_DIFF"])
         self.assertEqual(filtered_importances["feature"].tolist(), ["OFF_RATING_DIFF"])
 
+    def test_playoff_explanations_exclude_semantic_series_score(self):
+        factors = pd.DataFrame(
+            [
+                {"feature": "OFF_RATING_DIFF", "signed_contribution": 0.1},
+                {"feature": "game_number", "signed_contribution": 0.9},
+                {"feature": "series_score_diff", "signed_contribution": 0.8},
+                {"feature": "elimination_game", "signed_contribution": 0.7},
+            ]
+        )
+        importances = pd.DataFrame(
+            [
+                {"feature": "OFF_RATING_DIFF", "importance": 0.1},
+                {"feature": "game_number", "importance": 0.9},
+                {"feature": "series_score_diff", "importance": 0.8},
+                {"feature": "elimination_game", "importance": 0.7},
+            ]
+        )
+
+        filtered_factors, filtered_importances = filter_explanation_features_for_mode(
+            factors,
+            importances,
+            "Playoff Series Context",
+        )
+
+        self.assertNotIn("series_score_diff", filtered_factors["feature"].tolist())
+        self.assertNotIn("series_score_diff", filtered_importances["feature"].tolist())
+        self.assertIn("game_number", filtered_factors["feature"].tolist())
+
 
 if __name__ == "__main__":
     unittest.main()

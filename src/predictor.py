@@ -116,13 +116,16 @@ def _predict_probability(
         feature_season_type=feature_season_type,
         user_series_context=user_series_context,
     )
-    feature_frame = pd.DataFrame([features], columns=feature_columns)
+    prediction_features = dict(features)
+    if prediction_context_mode == PREDICTION_MODE_PLAYOFF and "series_score_diff" in feature_columns:
+        prediction_features["series_score_diff"] = 0.0
+    feature_frame = pd.DataFrame([prediction_features], columns=feature_columns)
 
     if debug:
         print("Final feature row before prediction:")
         print(
             json.dumps(
-                {column: _json_safe_feature_value(features.get(column)) for column in FEATURE_COLUMNS},
+                {column: _json_safe_feature_value(prediction_features.get(column)) for column in FEATURE_COLUMNS},
                 indent=2,
                 sort_keys=True,
             )
