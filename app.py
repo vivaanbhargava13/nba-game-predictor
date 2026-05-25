@@ -480,8 +480,120 @@ def inject_dashboard_css() -> None:
             }}
             .block-container {{
                 max-width: 1240px;
-                padding-top: 1rem;
+                padding-top: 1.45rem;
                 padding-bottom: 1rem;
+            }}
+            .sidebar-compact-separator {{
+                height: 1px;
+                background: #E6EAF0;
+                margin: 0.25rem 0 0.35rem;
+            }}
+            .sidebar-inline-label {{
+                color: var(--ink);
+                font-size: 0.9rem;
+                font-weight: 800;
+                line-height: 2.35rem;
+                white-space: nowrap;
+            }}
+            .sidebar-inline-label.right {{
+                text-align: right;
+            }}
+            .sidebar-inline-label.center {{
+                text-align: center;
+            }}
+            .sidebar-context-note {{
+                color: var(--muted);
+                font-size: 0.83rem;
+                margin: 0.35rem 0 0.5rem;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] {{
+                margin-bottom: 0.15rem;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+                min-height: 2.15rem;
+                background: #FFFFFF !important;
+                color: var(--ink) !important;
+                border-color: #D9DEE7 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] span,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] [data-baseweb="select"] div {{
+                color: var(--ink) !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] [aria-disabled="true"],
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] [aria-disabled="true"] * {{
+                background: #F7F8FA !important;
+                color: var(--ink) !important;
+                opacity: 1 !important;
+                -webkit-text-fill-color: var(--ink) !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"] svg {{
+                color: var(--ink) !important;
+                fill: var(--ink) !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] {{
+                width: 58px !important;
+                min-width: 58px !important;
+                max-width: 58px !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] {{
+                width: 56px !important;
+                min-width: 56px !important;
+                max-width: 56px !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] > div,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] > div {{
+                min-height: 2rem !important;
+                height: 2rem !important;
+                padding-left: 0 !important;
+                padding-right: 0 !important;
+                border-radius: 7px !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] > div > div:first-child,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] > div > div:first-child {{
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                text-align: center !important;
+                padding-left: 0.2rem !important;
+                padding-right: 0 !important;
+                min-width: 0 !important;
+                flex: 1 1 auto !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] > div > div:first-child > div,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] > div > div:first-child > div {{
+                width: 100% !important;
+                min-width: 0 !important;
+                text-align: center !important;
+                justify-content: center !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] > div > div:first-child > div:first-child,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] > div > div:first-child > div:first-child {{
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                width: 100% !important;
+                height: 100% !important;
+                min-width: 0 !important;
+                font-size: 0.86rem !important;
+                line-height: 1 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] input,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] input {{
+                caret-color: transparent !important;
+                color: transparent !important;
+                width: 0 !important;
+                min-width: 0 !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] > div > div:last-child,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] > div > div:last-child {{
+                width: 20px !important;
+                min-width: 20px !important;
+                flex: 0 0 20px !important;
+            }}
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="Game number"]) [data-baseweb="select"] svg,
+            [data-testid="stSidebar"] div[data-testid="stSelectbox"]:has([aria-label*="series wins"]) [data-baseweb="select"] svg {{
+                width: 18px !important;
+                height: 18px !important;
             }}
             .dashboard-title {{
                 font-size: 2.15rem;
@@ -1822,7 +1934,7 @@ def main() -> None:
         season = st.selectbox("Season", SEASON_OPTIONS, index=SEASON_OPTIONS.index(DEFAULT_SEASON))
         season_type = st.selectbox("Stats source", ["Regular Season", "Playoffs"], index=0)
         prediction_date = st.date_input("Prediction date", value=date.today())
-        st.markdown("---")
+        st.markdown('<div class="sidebar-compact-separator"></div>', unsafe_allow_html=True)
 
     model_bundle = cached_model(str(model_path))
     saved_feature_columns = all_saved_feature_columns(model_bundle) or model_bundle.get("feature_columns", DIFF_COLUMNS)
@@ -1855,21 +1967,27 @@ def main() -> None:
         team_a_series_wins = 0
         team_b_series_wins = 0
         if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
-            st.caption("User-provided hypothetical playoff series context.")
-            game_number = st.selectbox("Game number", list(range(1, 8)), index=0)
+            st.markdown(
+                '<div class="sidebar-context-note">User-provided hypothetical playoff series context.</div>',
+                unsafe_allow_html=True,
+            )
+            game_label_col, game_select_col = st.columns([1.45, 0.7], gap="small")
+            with game_label_col:
+                st.markdown('<div class="sidebar-inline-label">Game Number:</div>', unsafe_allow_html=True)
+            with game_select_col:
+                game_number = st.selectbox("Game number", list(range(1, 8)), index=0, label_visibility="collapsed")
             team_a_control_abbr = _abbr_from_label(team_a_label)
             team_b_control_abbr = _abbr_from_label(team_b_label)
             expected_series_wins = int(game_number) - 1
             team_a_win_options = valid_team_a_series_win_options(int(game_number))
-            score_label_col, score_a_name_col, score_a_col, score_dash_col, score_b_col, score_b_name_col = st.columns(
-                [1.15, 0.72, 0.62, 0.16, 0.62, 0.72],
+            st.markdown('<div class="sidebar-inline-label" style="line-height:1.4; margin-top:0.2rem;">Series Score:</div>', unsafe_allow_html=True)
+            score_a_name_col, score_a_col, score_dash_col, score_b_col, score_b_name_col = st.columns(
+                [0.45, 1.4, 0.18, 1.4, 0.45],
                 gap="small",
             )
-            with score_label_col:
-                st.markdown("<div style='padding-top:0.42rem; color:#172033; font-weight:800;'>Series score:</div>", unsafe_allow_html=True)
             with score_a_name_col:
                 st.markdown(
-                    f"<div style='padding-top:0.42rem; color:#172033; font-weight:800; text-align:right;'>{team_a_control_abbr}</div>",
+                    f'<div class="sidebar-inline-label right">{team_a_control_abbr}</div>',
                     unsafe_allow_html=True,
                 )
             with score_a_col:
@@ -1881,7 +1999,7 @@ def main() -> None:
                 )
             team_b_series_wins = expected_series_wins - int(team_a_series_wins)
             with score_dash_col:
-                st.markdown("<div style='text-align:center; padding-top:0.45rem; color:#667085; font-weight:800;'>-</div>", unsafe_allow_html=True)
+                st.markdown('<div class="sidebar-inline-label center">-</div>', unsafe_allow_html=True)
             with score_b_col:
                 team_b_series_wins = st.selectbox(
                     f"{team_b_control_abbr} series wins",
@@ -1892,7 +2010,7 @@ def main() -> None:
                 )
             with score_b_name_col:
                 st.markdown(
-                    f"<div style='padding-top:0.42rem; color:#172033; font-weight:800;'>{team_b_control_abbr}</div>",
+                    f'<div class="sidebar-inline-label">{team_b_control_abbr}</div>',
                     unsafe_allow_html=True,
                 )
         st.markdown("---")
