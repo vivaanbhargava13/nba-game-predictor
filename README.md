@@ -79,6 +79,7 @@ This saves:
 - processed feature rows in `data/processed/training_matchups_regular_season.csv` or `data/processed/training_matchups_playoffs.csv`
 - feature selection results in `data/processed/feature_selection.csv`
 - model comparison results in `data/processed/model_comparison.csv`
+- model calibration results in `data/processed/model_calibration.csv`
 - feature ablation results in `data/processed/feature_ablation.csv`
 - home-court feature ablation results in `data/processed/home_feature_ablation.csv`
 - feature importances in `data/processed/feature_importances.csv`
@@ -89,7 +90,9 @@ By default, training compares Logistic Regression, Random Forest, Gradient Boost
 - Train: `2015-16` through `2022-23`
 - Test: `2023-24` through `2024-25`
 
-It compares accuracy, ROC AUC, precision, recall, and F1. Results are sorted by ROC AUC in `data/processed/model_comparison.csv`.
+It compares accuracy, ROC AUC, Brier score, log loss, precision, recall, and F1. Results are sorted by ROC AUC in `data/processed/model_comparison.csv`.
+
+For production model selection, the trainer also compares raw, sigmoid-calibrated, and isotonic-calibrated probabilities for Logistic Regression, Random Forest, and Extra Trees. Calibration curves and expected calibration error are saved to `data/processed/model_calibration.csv`. The selected model metadata records model type, calibration method, train/test seasons, feature set, and validation metrics.
 
 Before model comparison, the trainer ranks features with Extra Trees and evaluates top `5`, `10`, `15`, `20`, `25`, and `all` feature subsets using the same season split. It saves the subset results to `data/processed/feature_selection.csv` and trains the compared models using the best subset.
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.model import (
+    PRODUCTION_MODEL_DEFAULTS,
     PRODUCTION_FEATURE_COLUMNS,
     PRODUCTION_FEATURE_SET_NAME,
     PLAYOFF_CONTEXT_FEATURE_COLUMNS,
@@ -73,6 +74,7 @@ class ModelComparisonTests(unittest.TestCase):
                 },
             )
             self.assertTrue({"accuracy", "roc_auc", "precision", "recall", "f1"}.issubset(comparison.columns))
+            self.assertTrue({"brier_score", "log_loss"}.issubset(comparison.columns))
             self.assertEqual(comparison["roc_auc"].tolist(), sorted(comparison["roc_auc"].tolist(), reverse=True))
             self.assertTrue(model_path.exists())
             self.assertTrue(comparison_path.exists())
@@ -126,6 +128,7 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertTrue(expected_sets.issubset(set(ablation["feature_set"])))
             self.assertEqual(set(ablation["model"]), {"Random Forest", "Extra Trees"})
             self.assertTrue({"accuracy", "roc_auc", "precision", "recall", "f1", "n_features"}.issubset(ablation.columns))
+            self.assertTrue({"brier_score", "log_loss"}.issubset(ablation.columns))
             self.assertTrue(ablation_path.exists())
             self.assertTrue(model_path.exists())
             self.assertTrue(importance_path.exists())
@@ -195,24 +198,67 @@ class ModelComparisonTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "model.joblib"
+            calibration_path = Path(tmpdir) / "model_calibration.csv"
             artifact = train_production_models(
                 pd.DataFrame(rows),
                 train_seasons=["2021-22", "2022-23"],
                 test_seasons=["2023-24", "2024-25"],
                 model_path=model_path,
                 feature_importance_path=Path(tmpdir) / "feature_importances.csv",
+                calibration_path=calibration_path,
             )
 
             saved = load_model(model_path)
+            calibration = pd.read_csv(calibration_path)
             self.assertEqual(saved["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
             self.assertIn("current_hypothetical_model", saved)
             self.assertIn("playoff_context_model", saved)
             self.assertIn("current_hypothetical_features", saved)
             self.assertIn("playoff_context_features", saved)
+            self.assertTrue(calibration_path.exists())
+            self.assertTrue(
+                {
+                    "model",
+                    "calibration_method",
+                    "brier_score",
+                    "log_loss",
+                    "expected_calibration_error",
+                    "bin_index",
+                    "mean_predicted_probability",
+                    "observed_win_rate",
+                }.issubset(calibration.columns)
+            )
+            self.assertTrue({"raw", "sigmoid", "isotonic"}.issubset(set(calibration["calibration_method"])))
+            self.assertIn("selected_models", saved["metadata"])
+            self.assertIn("calibration_method", saved["metadata"]["selected_models"][PREDICTION_MODE_CURRENT])
+            self.assertIn("calibration_method", saved["metadata"]["selected_models"][PREDICTION_MODE_PLAYOFF])
+            self.assertIn("calibration_method", get_model_entry_for_mode(artifact, PREDICTION_MODE_CURRENT)["metrics"])
+            self.assertEqual(
+                saved["metadata"]["selected_models"][PREDICTION_MODE_CURRENT]["model_type"],
+                PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][0],
+            )
+            self.assertEqual(
+                saved["metadata"]["selected_models"][PREDICTION_MODE_CURRENT]["calibration_method"],
+                PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][1],
+            )
+            self.assertEqual(
+                saved["metadata"]["selected_models"][PREDICTION_MODE_PLAYOFF]["model_type"],
+                PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_PLAYOFF][0],
+            )
+            self.assertEqual(
+                saved["metadata"]["selected_models"][PREDICTION_MODE_PLAYOFF]["calibration_method"],
+                PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_PLAYOFF][1],
+            )
+            self.assertIn("validation_rank", saved["metadata"]["selected_models"][PREDICTION_MODE_CURRENT]["metrics"])
+            self.assertIn("selected_by", saved["metadata"]["selected_models"][PREDICTION_MODE_PLAYOFF]["metrics"])
             self.assertEqual(saved["metadata"]["selected_home_feature_design"], saved["selected_home_feature_design"])
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_CURRENT)["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_PLAYOFF)["feature_columns"], PLAYOFF_CONTEXT_FEATURE_COLUMNS)
             self.assertNotEqual(saved["current_hypothetical_features"], saved["playoff_context_features"])
+            sample = pd.DataFrame([{feature: 0.0 for feature in saved["current_hypothetical_features"]}])
+            probability = saved["current_hypothetical_model"].predict_proba(sample)[0, 1]
+            self.assertGreaterEqual(probability, 0.0)
+            self.assertLessEqual(probability, 1.0)
             for feature in SERIES_CONTEXT_FEATURES:
                 self.assertNotIn(feature, PRODUCTION_FEATURE_COLUMNS)
                 self.assertIn(feature, PLAYOFF_CONTEXT_FEATURE_COLUMNS)

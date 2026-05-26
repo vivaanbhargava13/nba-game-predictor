@@ -152,6 +152,7 @@ def command_train(args: argparse.Namespace) -> None:
     home_ablation_path = Path(args.processed_dir) / "home_feature_ablation.csv"
     feature_importance_path = Path(args.processed_dir) / "feature_importances.csv"
     feature_selection_path = Path(args.processed_dir) / "feature_selection.csv"
+    calibration_path = Path(args.processed_dir) / "model_calibration.csv"
 
     train_seasons = season_range(args.comparison_train_start, args.comparison_train_end)
     test_seasons = season_range(args.comparison_test_start, args.comparison_test_end)
@@ -203,6 +204,7 @@ def command_train(args: argparse.Namespace) -> None:
             test_seasons=test_seasons,
             model_path=args.model_path,
             feature_importance_path=feature_importance_path,
+            calibration_path=calibration_path,
             home_feature_set_name=home_feature_set_name,
             home_feature_columns=home_feature_columns,
         )
@@ -215,6 +217,7 @@ def command_train(args: argparse.Namespace) -> None:
         print(f"Saved model comparison to {comparison_path}")
         print(f"Saved feature ablation to {ablation_path}")
         print(f"Saved home feature ablation to {home_ablation_path}")
+        print(f"Saved model calibration to {calibration_path}")
         print(f"Saved feature importances to {feature_importance_path}")
         print(f"Saved training data to {training_csv}")
         return

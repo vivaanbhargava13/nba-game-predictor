@@ -5,10 +5,20 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import AdaBoostClassifier, ExtraTreesClassifier, GradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    brier_score_loss,
+    classification_report,
+    f1_score,
+    log_loss,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
@@ -44,6 +54,12 @@ PRODUCTION_FEATURE_COLUMNS = TIER_1_FEATURES + HOME_ADVANTAGE_FEATURES + SEED_DI
 PLAYOFF_CONTEXT_FEATURE_COLUMNS = PRODUCTION_FEATURE_COLUMNS + SERIES_CONTEXT_FEATURES
 PREDICTION_MODE_CURRENT = "Current Hypothetical"
 PREDICTION_MODE_PLAYOFF = "Playoff Series Context"
+CALIBRATION_METHOD_RAW = "raw"
+CALIBRATION_METHODS = [CALIBRATION_METHOD_RAW, "sigmoid", "isotonic"]
+PRODUCTION_MODEL_DEFAULTS = {
+    PREDICTION_MODE_CURRENT: ("Random Forest", "isotonic"),
+    PREDICTION_MODE_PLAYOFF: ("Random Forest", "sigmoid"),
+}
 
 
 def build_model(random_state: int = 42) -> Pipeline:
@@ -141,6 +157,13 @@ def build_knn_model(random_state: int = 42) -> Pipeline:
     )
 
 
+CALIBRATION_MODEL_BUILDERS = {
+    "Logistic Regression": build_logistic_regression_model,
+    "Random Forest": build_random_forest_model,
+    "Extra Trees": build_extra_trees_model,
+}
+
+
 def _validate_training_frame(training_frame: pd.DataFrame, feature_columns: list[str] | None = None) -> None:
     if training_frame.empty:
         raise ValueError("No training rows were created. Check the selected seasons and NBA API access.")
@@ -152,16 +175,192 @@ def _validate_training_frame(training_frame: pd.DataFrame, feature_columns: list
 
 
 def _evaluate_model(pipeline: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> dict:
-    probabilities = pipeline.predict_proba(x_test)[:, 1]
+    probabilities = np.clip(pipeline.predict_proba(x_test)[:, 1], 1e-15, 1 - 1e-15)
     predictions = (probabilities >= 0.5).astype(int)
     return {
         "accuracy": float(accuracy_score(y_test, predictions)),
         "roc_auc": float(roc_auc_score(y_test, probabilities)) if y_test.nunique() == 2 else None,
+        "brier_score": float(brier_score_loss(y_test, probabilities)),
+        "log_loss": float(log_loss(y_test, probabilities, labels=[0, 1])),
         "precision": float(precision_score(y_test, predictions, zero_division=0)),
         "recall": float(recall_score(y_test, predictions, zero_division=0)),
         "f1": float(f1_score(y_test, predictions, zero_division=0)),
         "classification_report": classification_report(y_test, predictions),
     }
+
+
+def _calibration_cv_folds(y_train: pd.Series, preferred: int = 3) -> int | None:
+    class_counts = y_train.value_counts()
+    if len(class_counts) < 2:
+        return None
+    min_class_count = int(class_counts.min())
+    if min_class_count < 2:
+        return None
+    return min(preferred, min_class_count)
+
+
+def _build_probability_estimator(model_name: str, calibration_method: str, y_train: pd.Series):
+    builder = CALIBRATION_MODEL_BUILDERS[model_name]
+    base_pipeline = builder()
+    if calibration_method == CALIBRATION_METHOD_RAW:
+        return base_pipeline
+
+    cv_folds = _calibration_cv_folds(y_train)
+    if cv_folds is None:
+        raise ValueError("Calibration requires at least two examples from each class in the training split.")
+    return CalibratedClassifierCV(
+        estimator=base_pipeline,
+        method=calibration_method,
+        cv=cv_folds,
+    )
+
+
+def _expected_calibration_error(y_true: pd.Series, probabilities: np.ndarray, n_bins: int = 10) -> float:
+    rows = _calibration_curve_rows(y_true, probabilities, n_bins=n_bins)
+    if not rows:
+        return float("nan")
+    total = sum(row["bin_count"] for row in rows)
+    if total == 0:
+        return float("nan")
+    return float(
+        sum(
+            (row["bin_count"] / total) * abs(row["observed_win_rate"] - row["mean_predicted_probability"])
+            for row in rows
+            if row["bin_count"] > 0
+        )
+    )
+
+
+def _calibration_curve_rows(y_true: pd.Series, probabilities: np.ndarray, n_bins: int = 10) -> list[dict]:
+    y_values = pd.Series(y_true).astype(float).to_numpy()
+    probabilities = np.asarray(probabilities, dtype=float)
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    rows: list[dict] = []
+    for index in range(n_bins):
+        lower = bins[index]
+        upper = bins[index + 1]
+        if index == n_bins - 1:
+            mask = (probabilities >= lower) & (probabilities <= upper)
+        else:
+            mask = (probabilities >= lower) & (probabilities < upper)
+        count = int(mask.sum())
+        if count == 0:
+            mean_probability = np.nan
+            observed_rate = np.nan
+        else:
+            mean_probability = float(probabilities[mask].mean())
+            observed_rate = float(y_values[mask].mean())
+        rows.append(
+            {
+                "bin_index": index + 1,
+                "bin_lower": float(lower),
+                "bin_upper": float(upper),
+                "bin_count": count,
+                "mean_predicted_probability": mean_probability,
+                "observed_win_rate": observed_rate,
+                "calibration_gap": float(abs(observed_rate - mean_probability))
+                if count > 0
+                else np.nan,
+            }
+        )
+    return rows
+
+
+def _sort_probability_model_results(results: pd.DataFrame) -> pd.DataFrame:
+    sorted_results = results.sort_values(
+        ["roc_auc", "brier_score", "log_loss", "accuracy", "f1"],
+        ascending=[False, True, True, False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+    sorted_results["validation_rank"] = range(1, len(sorted_results) + 1)
+    return sorted_results
+
+
+def _select_production_probability_row(
+    summary: pd.DataFrame,
+    prediction_context_mode: str | None,
+) -> dict:
+    preferred = PRODUCTION_MODEL_DEFAULTS.get(str(prediction_context_mode or ""))
+    if preferred:
+        preferred_model, preferred_calibration = preferred
+        preferred_rows = summary[
+            summary["model"].eq(preferred_model)
+            & summary["calibration_method"].eq(preferred_calibration)
+        ]
+        if not preferred_rows.empty:
+            row = preferred_rows.iloc[0].to_dict()
+            row["selected_by"] = "calibrated_random_forest_production_default"
+            row["is_validation_best"] = int(row.get("validation_rank", 0)) == 1
+            row["preferred_production_model"] = preferred_model
+            row["preferred_calibration_method"] = preferred_calibration
+            return row
+
+    row = summary.iloc[0].to_dict()
+    row["selected_by"] = "best_validation_metrics"
+    row["is_validation_best"] = True
+    return row
+
+
+def _fit_probability_model_candidates(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_columns: list[str],
+    train_seasons: list[str] | None = None,
+    test_seasons: list[str] | None = None,
+    feature_set_name: str | None = None,
+    prediction_context_mode: str | None = None,
+    n_bins: int = 10,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[tuple[str, str], object]]:
+    y_train = train_df["TEAM_A_WON"]
+    y_test = test_df["TEAM_A_WON"]
+    x_train = train_df[feature_columns]
+    x_test = test_df[feature_columns]
+
+    summary_rows: list[dict] = []
+    calibration_rows: list[dict] = []
+    fitted_models: dict[tuple[str, str], object] = {}
+
+    for model_name in CALIBRATION_MODEL_BUILDERS:
+        for calibration_method in CALIBRATION_METHODS:
+            estimator = _build_probability_estimator(model_name, calibration_method, y_train)
+            estimator.fit(x_train, y_train)
+            fitted_models[(model_name, calibration_method)] = estimator
+            evaluation = _evaluate_model(estimator, x_test, y_test)
+            probabilities = np.clip(estimator.predict_proba(x_test)[:, 1], 1e-15, 1 - 1e-15)
+            ece = _expected_calibration_error(y_test, probabilities, n_bins=n_bins)
+            base_row = {
+                "model": model_name,
+                "model_type": model_name,
+                "calibration_method": calibration_method,
+                "train_seasons": ",".join(train_seasons or []),
+                "test_seasons": ",".join(test_seasons or []),
+                "feature_set": feature_set_name or "",
+                "prediction_context_mode": prediction_context_mode or "",
+                "n_features": int(len(feature_columns)),
+                "features": ",".join(feature_columns),
+                "train_rows": int(len(train_df)),
+                "test_rows": int(len(test_df)),
+                "accuracy": evaluation["accuracy"],
+                "roc_auc": evaluation["roc_auc"],
+                "brier_score": evaluation["brier_score"],
+                "log_loss": evaluation["log_loss"],
+                "precision": evaluation["precision"],
+                "recall": evaluation["recall"],
+                "f1": evaluation["f1"],
+                "expected_calibration_error": ece,
+            }
+            summary_rows.append(base_row)
+            for curve_row in _calibration_curve_rows(y_test, probabilities, n_bins=n_bins):
+                calibration_rows.append({**base_row, **curve_row})
+
+    summary = _sort_probability_model_results(pd.DataFrame(summary_rows))
+    calibration = pd.DataFrame(calibration_rows)
+    if not calibration.empty:
+        calibration = calibration.sort_values(
+            ["prediction_context_mode", "model", "calibration_method", "bin_index"],
+            na_position="last",
+        ).reset_index(drop=True)
+    return summary, calibration, fitted_models
 
 
 def train_model(training_frame: pd.DataFrame, model_path: str | Path) -> dict:
@@ -191,6 +390,8 @@ def train_model(training_frame: pd.DataFrame, model_path: str | Path) -> dict:
         "rows_with_missing_features": int(x.isna().any(axis=1).sum()),
         "accuracy": evaluation["accuracy"],
         "roc_auc": evaluation["roc_auc"],
+        "brier_score": evaluation["brier_score"],
+        "log_loss": evaluation["log_loss"],
         "precision": evaluation["precision"],
         "recall": evaluation["recall"],
         "f1": evaluation["f1"],
@@ -265,6 +466,8 @@ def compare_models_by_season(
                 "missing_feature_values_test": int(x_test.isna().sum().sum()),
                 "accuracy": evaluation["accuracy"],
                 "roc_auc": evaluation["roc_auc"],
+                "brier_score": evaluation["brier_score"],
+                "log_loss": evaluation["log_loss"],
                 "precision": evaluation["precision"],
                 "recall": evaluation["recall"],
                 "f1": evaluation["f1"],
@@ -407,6 +610,8 @@ def evaluate_feature_group_ablation(
                     "test_rows": int(len(test_df)),
                     "accuracy": evaluation["accuracy"],
                     "roc_auc": evaluation["roc_auc"],
+                    "brier_score": evaluation["brier_score"],
+                    "log_loss": evaluation["log_loss"],
                     "precision": evaluation["precision"],
                     "recall": evaluation["recall"],
                     "f1": evaluation["f1"],
@@ -502,6 +707,8 @@ def evaluate_home_feature_ablation(
                     "test_seasons": ",".join(test_seasons),
                     "accuracy": evaluation["accuracy"],
                     "roc_auc": evaluation["roc_auc"],
+                    "brier_score": evaluation["brier_score"],
+                    "log_loss": evaluation["log_loss"],
                     "precision": evaluation["precision"],
                     "recall": evaluation["recall"],
                     "f1": evaluation["f1"],
@@ -556,35 +763,28 @@ def _fit_best_production_pipeline(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     feature_columns: list[str],
-) -> tuple[str, Pipeline, dict]:
-    y_train = train_df["TEAM_A_WON"]
-    y_test = test_df["TEAM_A_WON"]
-    candidates = {
-        "Random Forest": build_random_forest_model,
-        "Extra Trees": build_extra_trees_model,
-    }
-    rows: list[dict] = []
-    fitted: dict[str, Pipeline] = {}
-    for model_name, builder in candidates.items():
-        pipeline = builder()
-        pipeline.fit(train_df[feature_columns], y_train)
-        fitted[model_name] = pipeline
-        evaluation = _evaluate_model(pipeline, test_df[feature_columns], y_test)
-        rows.append(
-            {
-                "model": model_name,
-                "accuracy": evaluation["accuracy"],
-                "roc_auc": evaluation["roc_auc"],
-                "precision": evaluation["precision"],
-                "recall": evaluation["recall"],
-                "f1": evaluation["f1"],
-                "classification_report": evaluation["classification_report"],
-            }
-        )
-
-    results = pd.DataFrame(rows).sort_values(["roc_auc", "accuracy", "f1"], ascending=False, na_position="last")
-    winner = results.iloc[0].to_dict()
-    return str(winner["model"]), fitted[str(winner["model"])], winner
+    train_seasons: list[str] | None = None,
+    test_seasons: list[str] | None = None,
+    feature_set_name: str | None = None,
+    prediction_context_mode: str | None = None,
+) -> tuple[str, object, dict, pd.DataFrame]:
+    summary, calibration, fitted = _fit_probability_model_candidates(
+        train_df=train_df,
+        test_df=test_df,
+        feature_columns=feature_columns,
+        train_seasons=train_seasons,
+        test_seasons=test_seasons,
+        feature_set_name=feature_set_name,
+        prediction_context_mode=prediction_context_mode,
+    )
+    winner = _select_production_probability_row(summary, prediction_context_mode)
+    model_name = str(winner["model"])
+    calibration_method = str(winner["calibration_method"])
+    winner["classification_report"] = classification_report(
+        test_df["TEAM_A_WON"],
+        (fitted[(model_name, calibration_method)].predict_proba(test_df[feature_columns])[:, 1] >= 0.5).astype(int),
+    )
+    return model_name, fitted[(model_name, calibration_method)], winner, calibration
 
 
 def train_production_models(
@@ -593,6 +793,7 @@ def train_production_models(
     test_seasons: list[str],
     model_path: str | Path,
     feature_importance_path: str | Path | None = None,
+    calibration_path: str | Path | None = None,
     home_feature_set_name: str = PRODUCTION_HOME_FEATURE_SET_NAME,
     home_feature_columns: list[str] | None = None,
 ) -> dict:
@@ -608,15 +809,42 @@ def train_production_models(
         _validate_training_frame(training_frame, columns)
 
     train_df, test_df = _season_split(training_frame, train_seasons, test_seasons)
-    current_model_name, current_pipeline, current_metrics = _fit_best_production_pipeline(
+    current_model_name, current_pipeline, current_metrics, current_calibration = _fit_best_production_pipeline(
         train_df,
         test_df,
         current_feature_columns,
+        train_seasons=train_seasons,
+        test_seasons=test_seasons,
+        feature_set_name=PRODUCTION_FEATURE_SET_NAME,
+        prediction_context_mode=PREDICTION_MODE_CURRENT,
     )
-    playoff_model_name, playoff_pipeline, playoff_metrics = _fit_best_production_pipeline(
+    playoff_model_name, playoff_pipeline, playoff_metrics, playoff_calibration = _fit_best_production_pipeline(
         train_df,
         test_df,
         playoff_feature_columns,
+        train_seasons=train_seasons,
+        test_seasons=test_seasons,
+        feature_set_name="playoff_context",
+        prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+    )
+
+    current_metrics.update(
+        {
+            "model_type": current_model_name,
+            "train_seasons": ",".join(train_seasons),
+            "test_seasons": ",".join(test_seasons),
+            "feature_set": PRODUCTION_FEATURE_SET_NAME,
+            "features": ",".join(current_feature_columns),
+        }
+    )
+    playoff_metrics.update(
+        {
+            "model_type": playoff_model_name,
+            "train_seasons": ",".join(train_seasons),
+            "test_seasons": ",".join(test_seasons),
+            "feature_set": "playoff_context",
+            "features": ",".join(playoff_feature_columns),
+        }
     )
 
     artifact = {
@@ -681,12 +909,37 @@ def train_production_models(
             "series_features_neutral_in_current_hypothetical": True,
             "home_feature_set": home_feature_set_name,
             "selected_home_feature_design": home_feature_set_name,
+            "model_selection": "season validation sorted by ROC-AUC, then Brier score, log loss, accuracy, and F1",
+            "selected_models": {
+                PREDICTION_MODE_CURRENT: {
+                    "model_type": current_metrics.get("model_type"),
+                    "calibration_method": current_metrics.get("calibration_method"),
+                    "train_seasons": train_seasons,
+                    "test_seasons": test_seasons,
+                    "feature_set": PRODUCTION_FEATURE_SET_NAME,
+                    "metrics": current_metrics,
+                },
+                PREDICTION_MODE_PLAYOFF: {
+                    "model_type": playoff_metrics.get("model_type"),
+                    "calibration_method": playoff_metrics.get("calibration_method"),
+                    "train_seasons": train_seasons,
+                    "test_seasons": test_seasons,
+                    "feature_set": "playoff_context",
+                    "metrics": playoff_metrics,
+                },
+            },
         },
     }
 
     model_path = Path(model_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifact, model_path)
+
+    if calibration_path is not None:
+        calibration = pd.concat([current_calibration, playoff_calibration], ignore_index=True)
+        calibration_path = Path(calibration_path)
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration.to_csv(calibration_path, index=False)
 
     if feature_importance_path is not None:
         current_importances = extract_feature_importances(
@@ -771,6 +1024,8 @@ def select_features_with_extra_trees(
                 "is_production_feature_set": False,
                 "accuracy": evaluation["accuracy"],
                 "roc_auc": evaluation["roc_auc"],
+                "brier_score": evaluation["brier_score"],
+                "log_loss": evaluation["log_loss"],
                 "precision": evaluation["precision"],
                 "recall": evaluation["recall"],
                 "f1": evaluation["f1"],
@@ -787,11 +1042,16 @@ def select_features_with_extra_trees(
 
 
 def extract_feature_importances(
-    pipeline: Pipeline,
+    pipeline,
     model_name: str,
     feature_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     feature_columns = feature_columns or DIFF_COLUMNS
+    if not hasattr(pipeline, "named_steps"):
+        return pd.DataFrame(
+            columns=["model", "feature", "importance", "importance_type"],
+            data=[[model_name, feature, np.nan, "not_available_for_calibrated_model"] for feature in feature_columns],
+        )
     classifier = pipeline.named_steps["classifier"]
     if hasattr(classifier, "feature_importances_"):
         values = classifier.feature_importances_
