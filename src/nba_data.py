@@ -917,6 +917,8 @@ def _playoff_context_features(
         team_b_wins = int(((prior_series["TEAM_ID"].astype(int) == int(team_b_id)) & prior_series["WL"].eq("W")).sum())
 
     return {
+        "seed_A": float(seed_a) if not pd.isna(seed_a) else np.nan,
+        "seed_B": float(seed_b) if not pd.isna(seed_b) else np.nan,
         "seed_difference": float(seed_b - seed_a) if not pd.isna(seed_a) and not pd.isna(seed_b) else np.nan,
         "higher_seed_A": float(int(seed_a < seed_b)) if not pd.isna(seed_a) and not pd.isna(seed_b) else np.nan,
         "game_number": float(team_a_wins + team_b_wins + 1),
@@ -929,6 +931,8 @@ def _neutral_playoff_context_features(seeds: dict[int, int] | None, team_a_id: i
     seed_a = seeds.get(int(team_a_id), np.nan) if seeds else np.nan
     seed_b = seeds.get(int(team_b_id), np.nan) if seeds else np.nan
     return {
+        "seed_A": float(seed_a) if not pd.isna(seed_a) else np.nan,
+        "seed_B": float(seed_b) if not pd.isna(seed_b) else np.nan,
         "seed_difference": float(seed_b - seed_a) if not pd.isna(seed_a) and not pd.isna(seed_b) else np.nan,
         "higher_seed_A": float(int(seed_a < seed_b)) if not pd.isna(seed_a) and not pd.isna(seed_b) else np.nan,
         "game_number": 1.0,
@@ -1028,7 +1032,10 @@ def build_matchup_feature_row(
     else:
         features["MISSING_FEATURE_COUNT"] = 0.0
 
-    return {column: features.get(column, np.nan) for column in MODEL_FEATURE_COLUMNS + ["MISSING_FEATURE_COUNT"]}
+    output = {column: features.get(column, np.nan) for column in MODEL_FEATURE_COLUMNS + ["MISSING_FEATURE_COUNT"]}
+    output["seed_A"] = features.get("seed_A", np.nan)
+    output["seed_B"] = features.get("seed_B", np.nan)
+    return output
 
 
 def _safe_season_type_label(season_type: str) -> str:

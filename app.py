@@ -395,6 +395,41 @@ def apply_semantic_series_factor_direction(factors: pd.DataFrame) -> pd.DataFram
     return adjusted
 
 
+def _semantic_feature_direction(feature: str, value) -> str | None:
+    numeric = float(value or 0.0)
+    if feature == "seed_difference":
+        if numeric > 0:
+            return "Team A"
+        if numeric < 0:
+            return "Team B"
+        return "Tied"
+    if feature == "higher_seed_A":
+        if numeric >= 1.0:
+            return "Team A"
+        if numeric <= 0.0:
+            return "Team B"
+        return "Tied"
+    if feature == "series_score_diff":
+        if numeric > 0:
+            return "Team A"
+        if numeric < 0:
+            return "Team B"
+        return "Tied"
+    return None
+
+
+def apply_semantic_factor_direction(factors: pd.DataFrame) -> pd.DataFrame:
+    """Use basketball semantics for deterministic context features shown to users."""
+    if factors.empty or "feature" not in factors.columns or "pushes_toward" not in factors.columns:
+        return factors
+    adjusted = factors.copy()
+    for index, row in adjusted.iterrows():
+        direction = _semantic_feature_direction(str(row.get("feature")), row.get("value", 0.0))
+        if direction is not None:
+            adjusted.at[index, "pushes_toward"] = direction
+    return adjusted
+
+
 def local_factor_table(
     features: dict[str, float],
     importances: pd.DataFrame,
@@ -416,9 +451,15 @@ def local_factor_table(
         factors["signed_contribution"] = factors["feature"].map(contributions).fillna(0.0)
     else:
         factors["signed_contribution"] = factors["value"] * factors["importance"]
-    factors["pushes_toward"] = factors["signed_contribution"].apply(lambda value: "Team A" if value >= 0 else "Team B")
+    factors["model_delta_direction"] = factors["signed_contribution"].apply(lambda value: "Team A" if value >= 0 else "Team B")
+    missing_or_zero_importance = factors["importance"].isna() | factors["importance"].eq(0.0)
+    factors.loc[missing_or_zero_importance, "importance"] = factors.loc[
+        missing_or_zero_importance,
+        "signed_contribution",
+    ].abs()
+    factors["pushes_toward"] = factors["model_delta_direction"]
     factors["abs_contribution"] = factors["signed_contribution"].abs()
-    factors = apply_semantic_series_factor_direction(factors)
+    factors = apply_semantic_factor_direction(factors)
     return factors.sort_values("abs_contribution", ascending=False).reset_index(drop=True)
 
 
@@ -455,16 +496,20 @@ def factor_chart(
 
 
 def display_factor_table(factors: pd.DataFrame, team_a_abbreviation: str, team_b_abbreviation: str) -> pd.DataFrame:
-    view = factors.head(10)[["feature", "value", "importance", "signed_contribution", "pushes_toward"]].copy()
-    view["pushes_toward"] = view["pushes_toward"].replace(
-        {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
-    )
+    columns = ["feature", "value", "importance", "signed_contribution", "model_delta_direction", "pushes_toward"]
+    view = factors.head(10)[[column for column in columns if column in factors.columns]].copy()
+    direction_labels = {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
+    if "pushes_toward" in view.columns:
+        view["pushes_toward"] = view["pushes_toward"].replace(direction_labels)
+    if "model_delta_direction" in view.columns:
+        view["model_delta_direction"] = view["model_delta_direction"].replace(direction_labels)
     return view.rename(
         columns={
             "feature": "feature",
             "value": "value",
             "importance": "importance",
             "signed_contribution": "signed_contribution",
+            "model_delta_direction": "model_delta_direction",
             "pushes_toward": "pushes_toward",
         }
     )
@@ -2455,6 +2500,14 @@ def build_prediction_context(
     if prediction_context_mode == PREDICTION_MODE_CURRENT:
         series_text = "Series tied 0-0"
         series_leader = "Tied"
+    seed_a = features.get("seed_A")
+    seed_b = features.get("seed_B")
+    seed_difference = features.get("seed_difference")
+    higher_seed_a = features.get("higher_seed_A")
+
+    def clean_optional_float(value):
+        return None if value is None or pd.isna(value) else float(value)
+
     return {
         "season": season,
         "season_type": season_type,
@@ -2463,6 +2516,10 @@ def build_prediction_context(
         "prediction_context_mode": prediction_context_mode,
         "selected_team": selected_abbr,
         "opponent": opponent_abbr,
+        "seed_A": clean_optional_float(seed_a),
+        "seed_B": clean_optional_float(seed_b),
+        "seed_difference": clean_optional_float(seed_difference),
+        "higher_seed_A": clean_optional_float(higher_seed_a),
         "selected_team_series_wins": selected_team_series_wins,
         "opponent_series_wins": opponent_series_wins,
         "series_score_diff": computed_series_score_diff,
@@ -3417,6 +3474,10 @@ def main() -> None:
                                 "selected_team": context.get("selected_team"),
                                 "opponent": context.get("opponent"),
                                 "home_team": _abbr_from_label(str(context.get("home_team", ""))),
+                                "seed_A": context.get("seed_A"),
+                                "seed_B": context.get("seed_B"),
+                                "seed_difference": context.get("seed_difference"),
+                                "higher_seed_A": context.get("higher_seed_A"),
                                 "selected_team_series_wins": context.get("selected_team_series_wins"),
                                 "opponent_series_wins": context.get("opponent_series_wins"),
                                 "series_score_diff": context.get("series_score_diff"),
