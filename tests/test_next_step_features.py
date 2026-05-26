@@ -123,6 +123,34 @@ class NextStepFeatureTests(unittest.TestCase):
         self.assertLess(features["seed_difference"], 0.0)
         self.assertEqual(features["higher_seed_A"], 0.0)
 
+    def test_nyk_seed_3_vs_cle_seed_4_favors_team_a(self):
+        features = _playoff_context_features(
+            team_a_id=1,
+            team_b_id=2,
+            prediction_date=pd.Timestamp("2024-04-07"),
+            playoff_games=pd.DataFrame(),
+            seeds={1: 3, 2: 4},
+        )
+
+        self.assertEqual(features["seed_A"], 3.0)
+        self.assertEqual(features["seed_B"], 4.0)
+        self.assertEqual(features["seed_difference"], 1.0)
+        self.assertEqual(features["higher_seed_A"], 1.0)
+
+    def test_cle_seed_4_vs_nyk_seed_3_favors_opponent(self):
+        features = _playoff_context_features(
+            team_a_id=1,
+            team_b_id=2,
+            prediction_date=pd.Timestamp("2024-04-07"),
+            playoff_games=pd.DataFrame(),
+            seeds={1: 4, 2: 3},
+        )
+
+        self.assertEqual(features["seed_A"], 4.0)
+        self.assertEqual(features["seed_B"], 3.0)
+        self.assertEqual(features["seed_difference"], -1.0)
+        self.assertEqual(features["higher_seed_A"], 0.0)
+
     def test_h2h_features_are_team_a_minus_team_b(self):
         team_a_games = pd.DataFrame(
             [
