@@ -30,6 +30,11 @@ from app import (
 
 
 class PredictionModeTests(unittest.TestCase):
+    def test_playoff_context_game_model_uses_current_production_features(self):
+        self.assertEqual(PLAYOFF_CONTEXT_FEATURE_COLUMNS, PRODUCTION_FEATURE_COLUMNS)
+        self.assertNotIn("game_number", PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+        self.assertNotIn("elimination_game", PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+
     def test_invalid_series_score_blocks_prediction(self):
         with self.assertRaisesRegex(ValueError, "For Game 7, the series score must add up to 6."):
             validate_series_score(game_number=7, team_a_series_wins=3, team_b_series_wins=2)
@@ -130,8 +135,8 @@ class PredictionModeTests(unittest.TestCase):
         game_features = game_win_prediction_features(features, PREDICTION_MODE_PLAYOFF)
 
         self.assertEqual(game_features["series_score_diff"], 0.0)
-        self.assertEqual(game_features["game_number"], 4.0)
-        self.assertEqual(game_features["elimination_game"], 1.0)
+        self.assertEqual(game_features["game_number"], 1.0)
+        self.assertEqual(game_features["elimination_game"], 0.0)
 
     def test_nyk_leads_chat_cannot_say_cleveland_leads(self):
         context = _prediction_context_for_series("NYK", "CLE", 3, 0)
@@ -176,18 +181,21 @@ class PredictionModeTests(unittest.TestCase):
         self.assertGreater(probability, 0.85)
 
     def test_game_probability_and_series_probability_are_separate_outputs(self):
+        raw_game_probability = 0.42
         context = _prediction_context_for_series(
             "NYK",
             "CLE",
             3,
             0,
-            team_a_probability=0.42,
-            team_a_series_probability=simulate_best_of_seven_series_probability(0.42, 3, 0),
+            team_a_probability=raw_game_probability,
+            team_a_series_probability=simulate_best_of_seven_series_probability(raw_game_probability, 3, 0),
         )
+        tied_series_probability = simulate_best_of_seven_series_probability(raw_game_probability, 2, 2)
 
-        self.assertEqual(context["team_a"]["win_probability"], 0.42)
+        self.assertEqual(context["team_a"]["win_probability"], raw_game_probability)
         self.assertNotEqual(context["team_a"]["win_probability"], context["team_a"]["series_win_probability"])
         self.assertGreater(context["team_a"]["series_win_probability"], context["team_a"]["win_probability"])
+        self.assertNotEqual(context["team_a"]["series_win_probability"], tied_series_probability)
 
     def test_series_tied_chat_does_not_invent_leader(self):
         context = _prediction_context_for_series("SAS", "OKC", 2, 2)
@@ -209,7 +217,7 @@ class CurrentPipeline:
 
 class PlayoffPipeline:
     def predict_proba(self, frame):
-        score = frame["game_number"].to_numpy(dtype=float) * 0.05 + frame["elimination_game"].to_numpy(dtype=float) * 0.1
+        score = frame["home_team_A"].to_numpy(dtype=float) * 0.1
         probabilities = 1.0 / (1.0 + np.exp(-score))
         return np.column_stack([1.0 - probabilities, probabilities])
 
@@ -243,8 +251,6 @@ def _run_prediction_pair(mode: str):
         captured_contexts.append(user_series_context)
         row = {feature: 0.0 for feature in PLAYOFF_CONTEXT_FEATURE_COLUMNS}
         row["home_team_A"] = 1.0 if home_team_id == 1 else 0.0
-        row["game_number"] = 1.0
-        row["elimination_game"] = 0.0
         if user_series_context:
             row.update(user_series_context)
         return row

@@ -51,14 +51,15 @@ HOME_FEATURE_SET_COLUMNS = {
     "clipped_home_split_features": CLIPPED_HOME_SPLIT_FEATURES,
 }
 PRODUCTION_FEATURE_COLUMNS = TIER_1_FEATURES + HOME_ADVANTAGE_FEATURES + SEED_DIRECTION_FEATURES
-PLAYOFF_CONTEXT_FEATURE_COLUMNS = PRODUCTION_FEATURE_COLUMNS + SERIES_CONTEXT_FEATURES
+# Playoff context is used for display/chat/series simulation, not single-game predict_proba.
+PLAYOFF_CONTEXT_FEATURE_COLUMNS = PRODUCTION_FEATURE_COLUMNS
 PREDICTION_MODE_CURRENT = "Current Hypothetical"
 PREDICTION_MODE_PLAYOFF = "Playoff Series Context"
 CALIBRATION_METHOD_RAW = "raw"
 CALIBRATION_METHODS = [CALIBRATION_METHOD_RAW, "sigmoid", "isotonic"]
 PRODUCTION_MODEL_DEFAULTS = {
     PREDICTION_MODE_CURRENT: ("Random Forest", "isotonic"),
-    PREDICTION_MODE_PLAYOFF: ("Random Forest", "sigmoid"),
+    PREDICTION_MODE_PLAYOFF: ("Random Forest", "isotonic"),
 }
 NON_LEAKY_AUDIT_EXCLUDED_FEATURES = {"series_score_diff", "game_number", "elimination_game"}
 
@@ -926,13 +927,17 @@ def train_production_models(
     home_feature_set_name: str = PRODUCTION_HOME_FEATURE_SET_NAME,
     home_feature_columns: list[str] | None = None,
 ) -> dict:
-    """Train and save separate artifacts for normal and playoff-context predictions."""
+    """Train and save production artifacts for normal and playoff-context predictions.
+
+    Both modes use the same single-game feature set. Playoff series inputs stay in
+    metadata/context and feed series win probability simulation outside predict_proba.
+    """
     home_feature_columns = home_feature_columns or HOME_FEATURE_SET_COLUMNS.get(
         home_feature_set_name,
         HOME_ADVANTAGE_FEATURES,
     )
     current_feature_columns = TIER_1_FEATURES + home_feature_columns + SEED_DIRECTION_FEATURES
-    playoff_feature_columns = current_feature_columns + SERIES_CONTEXT_FEATURES
+    playoff_feature_columns = list(current_feature_columns)
 
     for columns in [current_feature_columns, playoff_feature_columns]:
         _validate_training_frame(training_frame, columns)
@@ -953,7 +958,7 @@ def train_production_models(
         playoff_feature_columns,
         train_seasons=train_seasons,
         test_seasons=test_seasons,
-        feature_set_name="playoff_context",
+        feature_set_name=PRODUCTION_FEATURE_SET_NAME,
         prediction_context_mode=PREDICTION_MODE_PLAYOFF,
     )
 
@@ -971,8 +976,9 @@ def train_production_models(
             "model_type": playoff_model_name,
             "train_seasons": ",".join(train_seasons),
             "test_seasons": ",".join(test_seasons),
-            "feature_set": "playoff_context",
+            "feature_set": PRODUCTION_FEATURE_SET_NAME,
             "features": ",".join(playoff_feature_columns),
+            "series_context_used_for_game_prediction": False,
         }
     )
 
@@ -1007,7 +1013,7 @@ def train_production_models(
                 "pipeline": playoff_pipeline,
                 "feature_columns": playoff_feature_columns,
                 "metrics": playoff_metrics,
-                "feature_set": "playoff_context",
+                "feature_set": PRODUCTION_FEATURE_SET_NAME,
                 "home_feature_set": home_feature_set_name,
                 "selected_home_feature_design": home_feature_set_name,
             },
@@ -1025,7 +1031,7 @@ def train_production_models(
                 "pipeline": playoff_pipeline,
                 "feature_columns": playoff_feature_columns,
                 "metrics": playoff_metrics,
-                "feature_set": "playoff_context",
+                "feature_set": PRODUCTION_FEATURE_SET_NAME,
                 "home_feature_set": home_feature_set_name,
                 "selected_home_feature_design": home_feature_set_name,
             },
@@ -1036,6 +1042,15 @@ def train_production_models(
             "current_hypothetical_features": current_feature_columns,
             "playoff_context_features": playoff_feature_columns,
             "series_features_neutral_in_current_hypothetical": True,
+            "series_context_used_for_game_prediction": False,
+            "series_context_used_for_series_probability": True,
+            "game_prediction_feature_policy": (
+                "Current Hypothetical and Playoff Series Context both use the current "
+                "production feature set for single-game predict_proba. Playoff series "
+                "context affects display, chatbot/debug context, and separate series "
+                "win probability simulation only."
+            ),
+            "series_context_metadata_features": ["game_number", "elimination_game", "series_score_diff"],
             "home_feature_set": home_feature_set_name,
             "selected_home_feature_design": home_feature_set_name,
             "model_selection": "season validation sorted by ROC-AUC, then Brier score, log loss, accuracy, and F1",
@@ -1053,7 +1068,7 @@ def train_production_models(
                     "calibration_method": playoff_metrics.get("calibration_method"),
                     "train_seasons": train_seasons,
                     "test_seasons": test_seasons,
-                    "feature_set": "playoff_context",
+                    "feature_set": PRODUCTION_FEATURE_SET_NAME,
                     "metrics": playoff_metrics,
                 },
             },

@@ -118,8 +118,15 @@ def _predict_probability(
         user_series_context=user_series_context,
     )
     prediction_features = dict(features)
-    if prediction_context_mode == PREDICTION_MODE_PLAYOFF and "series_score_diff" in feature_columns:
-        prediction_features["series_score_diff"] = 0.0
+    if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
+        neutral_series_values = {
+            "series_score_diff": 0.0,
+            "game_number": 1.0,
+            "elimination_game": 0.0,
+        }
+        for feature, neutral_value in neutral_series_values.items():
+            if feature in feature_columns:
+                prediction_features[feature] = neutral_value
     feature_frame = pd.DataFrame([prediction_features], columns=feature_columns)
 
     if debug:

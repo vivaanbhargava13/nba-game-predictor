@@ -255,14 +255,17 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertEqual(saved["metadata"]["selected_home_feature_design"], saved["selected_home_feature_design"])
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_CURRENT)["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_PLAYOFF)["feature_columns"], PLAYOFF_CONTEXT_FEATURE_COLUMNS)
-            self.assertNotEqual(saved["current_hypothetical_features"], saved["playoff_context_features"])
+            self.assertEqual(saved["current_hypothetical_features"], saved["playoff_context_features"])
+            self.assertFalse(saved["metadata"]["series_context_used_for_game_prediction"])
+            self.assertTrue(saved["metadata"]["series_context_used_for_series_probability"])
+            self.assertIn("current production feature set", saved["metadata"]["game_prediction_feature_policy"])
             sample = pd.DataFrame([{feature: 0.0 for feature in saved["current_hypothetical_features"]}])
             probability = saved["current_hypothetical_model"].predict_proba(sample)[0, 1]
             self.assertGreaterEqual(probability, 0.0)
             self.assertLessEqual(probability, 1.0)
             for feature in SERIES_CONTEXT_FEATURES:
                 self.assertNotIn(feature, PRODUCTION_FEATURE_COLUMNS)
-                self.assertIn(feature, PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+                self.assertNotIn(feature, PLAYOFF_CONTEXT_FEATURE_COLUMNS)
 
     def test_calibrated_feature_audit_saves_required_columns(self):
         rows = []

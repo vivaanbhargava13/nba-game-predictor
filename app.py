@@ -337,6 +337,8 @@ def game_win_prediction_features(
     game_features = dict(features)
     if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
         game_features["series_score_diff"] = 0.0
+        game_features["game_number"] = float(NEUTRAL_FEATURE_VALUES["game_number"])
+        game_features["elimination_game"] = float(NEUTRAL_FEATURE_VALUES["elimination_game"])
     return game_features
 
 
@@ -508,8 +510,7 @@ def filter_explanation_features_for_mode(
     prediction_context_mode: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     excluded_features = set(SEMANTIC_SERIES_FEATURES)
-    if prediction_context_mode == "Current Hypothetical":
-        excluded_features.update(SERIES_CONTEXT_FEATURES)
+    excluded_features.update(SERIES_CONTEXT_FEATURES)
     return (
         factors[~factors["feature"].isin(excluded_features)].reset_index(drop=True),
         importances[~importances["feature"].isin(excluded_features)].reset_index(drop=True),
