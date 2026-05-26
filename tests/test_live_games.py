@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,8 @@ from src.live_games import (
 )
 from app import (
     PREDICTION_MODE_PLAYOFF,
+    compute_live_game_prediction,
+    compute_matchup_prediction,
     _upcoming_prediction_result,
     build_live_games_topbar_html,
     get_team_colors,
@@ -24,6 +27,7 @@ from app import (
     live_game_button_label,
     live_game_context_lines,
     live_game_payload,
+    live_game_prediction_context,
     live_game_render_payloads,
     live_game_selection_state,
     safe_live_games_payload,
@@ -531,6 +535,21 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(len(live_game_render_payloads(live_games, "latest")), 3)
         self.assertEqual(len(live_game_render_payloads(live_games, "upcoming")), 3)
 
+    def test_latest_render_payloads_are_oldest_to_newest_left_to_right(self):
+        live_games = {
+            "latest": [
+                _game("newest", "NYK", "CLE"),
+                _game("middle", "BOS", "MIA"),
+                _game("oldest", "LAL", "GSW"),
+                _game("older", "DAL", "DEN"),
+            ],
+            "upcoming": [],
+        }
+
+        payloads = live_game_render_payloads(live_games, "latest")
+
+        self.assertEqual([payload["game_id"] for payload in payloads], ["oldest", "middle", "newest"])
+
     def test_upcoming_prediction_failure_returns_debug_reason(self):
         def failing_predictor(**_kwargs):
             raise RuntimeError("model unavailable")
@@ -572,6 +591,84 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(captured["team_a"], "NYK")
         self.assertEqual(captured["team_b"], "CLE")
         self.assertEqual(captured["home_team"], "team2")
+
+    def test_nyk_at_cle_live_card_probability_matches_main_prediction_helper(self):
+        def fake_predictor(**kwargs):
+            return 0.435, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
+
+        game = _game("401", "NYK", "CLE")
+        game.update(
+            {
+                "series_status": "NYK leads 3-0",
+                "away_series_wins": 3,
+                "home_series_wins": 0,
+                "game_number": 4,
+            }
+        )
+        payload = live_game_payload(game)
+
+        card = compute_live_game_prediction(payload, model_available=True, predictor=fake_predictor)
+        main = compute_matchup_prediction(**live_game_prediction_context(payload), predictor=fake_predictor)
+        prediction, debug = _upcoming_prediction_result(payload, model_available=True, predictor=fake_predictor)
+
+        self.assertIsNone(debug)
+        self.assertEqual(card["team_a_probability"], main["team_a_probability"])
+        self.assertEqual(card["team_a_series_probability"], main["team_a_series_probability"])
+        self.assertIn("NYK 44% - <strong>56%</strong> CLE", prediction)
+        self.assertNotIn("Series:", prediction)
+
+    def test_sas_at_okc_live_card_probability_matches_main_prediction_helper(self):
+        def fake_predictor(**kwargs):
+            return 0.382, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
+
+        game = _game("402", "SAS", "OKC")
+        game.update(
+            {
+                "series_status": "Series tied 2-2",
+                "away_series_wins": 2,
+                "home_series_wins": 2,
+                "game_number": 5,
+            }
+        )
+        payload = live_game_payload(game)
+
+        card = compute_live_game_prediction(payload, model_available=True, predictor=fake_predictor)
+        main = compute_matchup_prediction(**live_game_prediction_context(payload), predictor=fake_predictor)
+
+        self.assertEqual(card["team_a_probability"], main["team_a_probability"])
+        self.assertEqual(card["team_a_series_probability"], main["team_a_series_probability"])
+
+    def test_espn_live_cache_does_not_store_prediction_probabilities(self):
+        game = _game("401", "NYK", "CLE")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("src.live_games._scan_scoreboards", return_value=([game], [game])):
+                load_live_games(cache_dir=Path(tmpdir), ttl_seconds=0, today=date(2026, 5, 25))
+            cached = json.loads((Path(tmpdir) / "live_games.json").read_text())
+
+        serialized = json.dumps(cached)
+        self.assertNotIn("probability", serialized)
+        self.assertNotIn("prediction", serialized)
+
+    def test_playoff_context_upcoming_card_displays_game_probability_only(self):
+        def fake_predictor(**kwargs):
+            return 0.435, {}, None, None, None
+
+        game = _game("401", "NYK", "CLE")
+        game.update(
+            {
+                "series_status": "NYK leads 3-0",
+                "away_series_wins": 3,
+                "home_series_wins": 0,
+                "game_number": 4,
+            }
+        )
+
+        prediction, debug = _upcoming_prediction_result(live_game_payload(game), model_available=True, predictor=fake_predictor)
+
+        self.assertIsNone(debug)
+        self.assertIn("NYK 44% - <strong>56%</strong> CLE", prediction)
+        self.assertNotIn("Game:", prediction)
+        self.assertNotIn("Series:", prediction)
 
     def test_sas_alias_uses_spurs_colors(self):
         game = parse_espn_scoreboard_games(

@@ -1352,38 +1352,158 @@ def _plain_score_text(game: dict) -> str:
     return f"{away_abbr} {away_score} - {home_score} {home_abbr}"
 
 
+def live_game_prediction_context(game: dict) -> dict:
+    game_date = live_game_date(game)
+    away_series_wins = game.get("away_series_wins")
+    home_series_wins = game.get("home_series_wins")
+    has_series_context = (
+        bool(game.get("series_status"))
+        or bool(game.get("if_necessary"))
+        or game.get("game_number") is not None
+        or away_series_wins is not None
+        or home_series_wins is not None
+    )
+    game_number = int(game.get("game_number") or 1)
+    game_number = min(7, max(1, game_number))
+    team_a_series_wins = int(away_series_wins or 0)
+    team_b_series_wins = int(home_series_wins or 0)
+    if game_number == 7:
+        team_a_series_wins = 3
+        team_b_series_wins = 3
+    elif has_series_context:
+        expected_total = game_number - 1
+        if team_a_series_wins + team_b_series_wins != expected_total:
+            team_b_series_wins = max(0, expected_total - team_a_series_wins)
+
+    return {
+        "team_a": str(game.get("away_abbr") or ""),
+        "team_b": str(game.get("home_abbr") or ""),
+        "season": str(game.get("season") or nba_season_from_date(game_date)),
+        "prediction_date": game_date.isoformat(),
+        "home_team": "team2",
+        "feature_season_type": DEFAULT_SEASON_TYPE,
+        "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
+        "game_number": game_number,
+        "team_a_series_wins": team_a_series_wins,
+        "team_b_series_wins": team_b_series_wins,
+    }
+
+
+def compute_matchup_prediction(
+    *,
+    team_a: str,
+    team_b: str,
+    season: str,
+    prediction_date: str,
+    home_team: str,
+    feature_season_type: str,
+    prediction_context_mode: str,
+    game_number: int = 1,
+    team_a_series_wins: int = 0,
+    team_b_series_wins: int = 0,
+    predictor=_predict_probability,
+) -> dict:
+    probability, features, team_a_stats, team_b_stats, home_team_id = predictor(
+        team_a=team_a,
+        team_b=team_b,
+        season=season,
+        prediction_date=prediction_date,
+        home_team=home_team,
+        cache_dir=DEFAULT_CACHE_DIR,
+        feature_season_type=feature_season_type,
+        model_path=DEFAULT_MODEL_PATH,
+        debug=False,
+        prediction_context_mode=prediction_context_mode,
+        game_number=int(game_number),
+        team_a_series_wins=int(team_a_series_wins),
+        team_b_series_wins=int(team_b_series_wins),
+    )
+    game_features = game_win_prediction_features(features, prediction_context_mode)
+    series_probability = None
+    if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
+        series_probability = simulate_best_of_seven_series_probability(
+            probability,
+            int(team_a_series_wins),
+            int(team_b_series_wins),
+        )
+    return {
+        "team_a_probability": float(probability),
+        "team_b_probability": float(1 - probability),
+        "team_a_series_probability": series_probability,
+        "team_b_series_probability": None if series_probability is None else float(1 - series_probability),
+        "features": features,
+        "game_features": game_features,
+        "team_a_stats": team_a_stats,
+        "team_b_stats": team_b_stats,
+        "home_team_id": home_team_id,
+        "prediction_context": {
+            "season": season,
+            "prediction_date": prediction_date,
+            "home_team": home_team,
+            "feature_season_type": feature_season_type,
+            "prediction_context_mode": prediction_context_mode,
+            "game_number": int(game_number),
+            "team_a_series_wins": int(team_a_series_wins),
+            "team_b_series_wins": int(team_b_series_wins),
+        },
+        "freshly_computed": True,
+    }
+
+
+def compute_live_game_prediction(game: dict, model_available: bool, predictor=_predict_probability) -> dict:
+    if not model_available:
+        raise RuntimeError("Model artifact is unavailable.")
+    context = live_game_prediction_context(game)
+    return compute_matchup_prediction(
+        **context,
+        predictor=predictor,
+    )
+
+
+def _format_matchup_probability_line(
+    prefix: str,
+    away_abbr: str,
+    home_abbr: str,
+    away_probability: float,
+) -> str:
+    away_pct = f"{away_probability:.0%}"
+    home_pct = f"{1 - away_probability:.0%}"
+    if away_probability >= 0.5:
+        away_pct = f"<strong>{away_pct}</strong>"
+    else:
+        home_pct = f"<strong>{home_pct}</strong>"
+    prefix_text = f"{prefix}: " if prefix else ""
+    return f"{prefix_text}{html.escape(away_abbr)} {away_pct} - {home_pct} {html.escape(home_abbr)}"
+
+
+def _upcoming_prediction_result_with_payload(
+    game: dict,
+    model_available: bool,
+    predictor=_predict_probability,
+) -> tuple[str, str | None, dict | None]:
+    away_abbr = str(game.get("away_abbr", ""))
+    home_abbr = str(game.get("home_abbr", ""))
+    try:
+        result = compute_live_game_prediction(game, model_available=model_available, predictor=predictor)
+    except Exception as exc:
+        return "Prediction unavailable", f"{away_abbr} @ {home_abbr}: {exc}", None
+
+    prediction = _format_matchup_probability_line(
+        "",
+        away_abbr,
+        home_abbr,
+        float(result["team_a_probability"]),
+    )
+    return prediction, None, result
+
+
 def _upcoming_prediction_result(
     game: dict,
     model_available: bool,
     predictor=_predict_probability,
 ) -> tuple[str, str | None]:
-    if not model_available:
-        return "Prediction unavailable", "Model artifact is unavailable."
-    away_abbr = str(game.get("away_abbr", ""))
-    home_abbr = str(game.get("home_abbr", ""))
-    eastern_game_date = live_game_date(game)
-    try:
-        probability, *_ = predictor(
-            team_a=away_abbr,
-            team_b=home_abbr,
-            season=nba_season_from_date(eastern_game_date),
-            prediction_date=eastern_game_date.isoformat(),
-            home_team="team2",
-            cache_dir=DEFAULT_CACHE_DIR,
-            feature_season_type=DEFAULT_SEASON_TYPE,
-            model_path=DEFAULT_MODEL_PATH,
-            prediction_context_mode=PREDICTION_MODE_CURRENT,
-        )
-    except Exception as exc:
-        return "Prediction unavailable", f"{away_abbr} @ {home_abbr}: {exc}"
-
-    away_pct = f"{probability:.0%}"
-    home_pct = f"{1 - probability:.0%}"
-    if probability >= 0.5:
-        away_pct = f"<strong>{away_pct}</strong>"
-    else:
-        home_pct = f"<strong>{home_pct}</strong>"
-    return f"{html.escape(away_abbr)} {away_pct} - {home_pct} {html.escape(home_abbr)}", None
+    prediction, debug, _result = _upcoming_prediction_result_with_payload(game, model_available, predictor)
+    return prediction, debug
 
 
 def _upcoming_prediction(game: dict, model_available: bool) -> str:
@@ -1395,6 +1515,7 @@ def _plain_upcoming_prediction(prediction_html: str) -> str:
     return (
         prediction_html.replace("<strong>", "")
         .replace("</strong>", "")
+        .replace("<br>", "\n")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -1434,7 +1555,7 @@ def _upcoming_game_card_html(game: dict, model_available: bool) -> str:
 
 def build_live_games_topbar_html(live_games: dict, model_available: bool) -> str:
     live_games = live_games if isinstance(live_games, dict) else {"latest": [], "upcoming": []}
-    latest_cards = [_latest_game_card_html(game) for game in (live_games.get("latest") or [])[:3]]
+    latest_cards = [_latest_game_card_html(game) for game in reversed((live_games.get("latest") or [])[:3])]
     upcoming_cards = [_upcoming_game_card_html(game, model_available) for game in (live_games.get("upcoming") or [])[:3]]
     if not latest_cards:
         latest_cards = ['<div class="live-game-card"><div class="live-game-note">Latest games unavailable</div></div>']
@@ -1510,6 +1631,7 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
         "home_team_label": home_label,
         "prediction_date": game_date,
         "season": season,
+        "season_type": DEFAULT_SEASON_TYPE,
         "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
         "game_number": game_number,
         "team_a_series_wins": team_a_series_wins,
@@ -1576,7 +1698,10 @@ def live_game_button_label(game: dict, *, is_upcoming: bool, model_available: bo
 
 
 def live_game_render_payloads(live_games: dict, section: str) -> list[dict]:
-    return [live_game_payload(game) for game in (live_games.get(section) or [])[:3]]
+    games = (live_games.get(section) or [])[:3]
+    if section == "latest":
+        games = list(reversed(games))
+    return [live_game_payload(game) for game in games]
 
 
 def render_live_card_button(payload: dict, labels: list[str], section: str, index: int) -> None:
@@ -1618,15 +1743,23 @@ def render_live_games_topbar(live_games: dict, model_available: bool, labels: li
         else:
             upcoming_cols = st.columns(len(upcoming_games), gap="small")
             for index, payload in enumerate(upcoming_games):
-                prediction, debug = _upcoming_prediction_result(payload, model_available)
+                prediction, debug, computed = _upcoming_prediction_result_with_payload(payload, model_available)
+                prediction_debug = {
+                    "game_id": str(payload.get("game_id") or ""),
+                    "game": f"{payload.get('away_abbr')} @ {payload.get('home_abbr')}",
+                    "card_prediction_context": json.dumps(live_game_prediction_context(payload), sort_keys=True),
+                    "card_game_probability": None,
+                    "card_series_probability": None,
+                    "freshly_computed": False,
+                    "reason": debug or "",
+                }
+                if computed:
+                    prediction_debug["card_game_probability"] = computed.get("team_a_probability")
+                    prediction_debug["card_series_probability"] = computed.get("team_a_series_probability")
+                    prediction_debug["freshly_computed"] = bool(computed.get("freshly_computed"))
+                debug_rows.append(prediction_debug)
                 if debug:
-                    debug_rows.append(
-                        {
-                            "game_id": str(payload.get("game_id") or ""),
-                            "game": f"{payload.get('away_abbr')} @ {payload.get('home_abbr')}",
-                            "reason": debug,
-                        }
-                    )
+                    debug_rows[-1]["reason"] = debug
                 with upcoming_cols[index]:
                     st.markdown(_upcoming_game_card_html_from_prediction(payload, prediction), unsafe_allow_html=True)
                     render_live_card_button(payload, labels, "upcoming", index)
@@ -3052,38 +3185,25 @@ def main() -> None:
     if predict_clicked:
         try:
             alternate_home_team_arg = "team2" if home_team_arg == "team1" else "team1"
-            raw_team_a_probability, features, _, _, _ = _predict_probability(
+            prediction_result = compute_matchup_prediction(
                 team_a=str(team_a["TEAM_ABBREVIATION"]),
                 team_b=str(team_b["TEAM_ABBREVIATION"]),
                 season=season,
                 prediction_date=prediction_date.isoformat(),
                 home_team=home_team_arg,
-                cache_dir=DEFAULT_CACHE_DIR,
                 feature_season_type=season_type,
-                model_path=DEFAULT_MODEL_PATH,
-                debug=False,
                 prediction_context_mode=prediction_context_mode,
                 game_number=int(game_number),
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
             )
-            game_features = game_win_prediction_features(features, prediction_context_mode)
-            team_a_probability = predict_probability_from_features(
-                active_model_entry["pipeline"],
-                game_features,
-                feature_columns,
-            )
+            team_a_probability = prediction_result["team_a_probability"]
+            team_a_series_probability = prediction_result["team_a_series_probability"]
+            features = prediction_result["features"]
+            game_features = prediction_result["game_features"]
         except Exception as exc:
             st.error(f"Could not run prediction: {exc}")
             st.stop()
-
-        team_a_series_probability = None
-        if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
-            team_a_series_probability = simulate_best_of_seven_series_probability(
-                team_a_probability,
-                int(team_a_series_wins),
-                int(team_b_series_wins),
-            )
 
         home_debug_rows = [
             {
@@ -3100,27 +3220,20 @@ def main() -> None:
             }
         ]
         try:
-            _alternate_raw_probability, alternate_features, _, _, _ = _predict_probability(
+            alternate_prediction_result = compute_matchup_prediction(
                 team_a=str(team_a["TEAM_ABBREVIATION"]),
                 team_b=str(team_b["TEAM_ABBREVIATION"]),
                 season=season,
                 prediction_date=prediction_date.isoformat(),
                 home_team=alternate_home_team_arg,
-                cache_dir=DEFAULT_CACHE_DIR,
                 feature_season_type=season_type,
-                model_path=DEFAULT_MODEL_PATH,
-                debug=False,
                 prediction_context_mode=prediction_context_mode,
                 game_number=int(game_number),
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
             )
-            alternate_game_features = game_win_prediction_features(alternate_features, prediction_context_mode)
-            alternate_probability = predict_probability_from_features(
-                active_model_entry["pipeline"],
-                alternate_game_features,
-                feature_columns,
-            )
+            alternate_features = alternate_prediction_result["features"]
+            alternate_probability = alternate_prediction_result["team_a_probability"]
             home_debug_rows.append(
                 {
                     "selection": f"{team_a['TEAM_ABBREVIATION']} home"
