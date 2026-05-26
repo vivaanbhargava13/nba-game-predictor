@@ -60,6 +60,7 @@ PRODUCTION_MODEL_DEFAULTS = {
     PREDICTION_MODE_CURRENT: ("Random Forest", "isotonic"),
     PREDICTION_MODE_PLAYOFF: ("Random Forest", "sigmoid"),
 }
+NON_LEAKY_AUDIT_EXCLUDED_FEATURES = {"series_score_diff", "game_number", "elimination_game"}
 
 
 def build_model(random_state: int = 42) -> Pipeline:
@@ -726,6 +727,134 @@ def evaluate_home_feature_ablation(
     home_ablation_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(home_ablation_path, index=False)
     return results
+
+
+def build_calibrated_feature_audit_sets(
+    training_frame: pd.DataFrame,
+    home_feature_columns: list[str] | None = None,
+) -> dict[str, tuple[list[str], str, str]]:
+    """Return calibrated Random Forest audit groups without changing production defaults."""
+    home_feature_columns = home_feature_columns or HOME_ADVANTAGE_FEATURES
+    production = _available_features(TIER_1_FEATURES + home_feature_columns + SEED_DIRECTION_FEATURES, training_frame)
+    non_leaky_features = [
+        feature
+        for feature in DIFF_COLUMNS
+        if feature in training_frame.columns and feature not in NON_LEAKY_AUDIT_EXCLUDED_FEATURES
+    ]
+    without_seed = [feature for feature in production if feature not in SEED_DIRECTION_FEATURES]
+    without_home = [feature for feature in production if feature not in set(home_feature_columns)]
+    playoff_with_context = _available_features(production + SERIES_CONTEXT_FEATURES, training_frame)
+
+    current_calibration = PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][1]
+    playoff_calibration = PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_PLAYOFF][1]
+    return {
+        "current_production_features": (production, PREDICTION_MODE_CURRENT, current_calibration),
+        "production_plus_h2h": (
+            _available_features(production + TIER_8_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_style_matchups": (
+            _available_features(production + TIER_10_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_weighted_recent_form": (
+            _available_features(production + WEIGHTED_RECENT_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_star_player_features": (
+            _available_features(production + TIER_3_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_all_non_leaky_features": (
+            non_leaky_features,
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_without_seed_features": (
+            without_seed,
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_without_home_features": (
+            without_home,
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "playoff_context_without_game_number_elimination": (
+            production,
+            PREDICTION_MODE_PLAYOFF,
+            playoff_calibration,
+        ),
+        "playoff_context_with_game_number_elimination": (
+            playoff_with_context,
+            PREDICTION_MODE_PLAYOFF,
+            playoff_calibration,
+        ),
+    }
+
+
+def evaluate_calibrated_feature_audit(
+    training_frame: pd.DataFrame,
+    train_seasons: list[str],
+    test_seasons: list[str],
+    audit_path: str | Path,
+    home_feature_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Audit calibrated Random Forest validation performance across existing feature groups."""
+    train_df, test_df = _season_split(training_frame, train_seasons, test_seasons)
+    feature_sets = build_calibrated_feature_audit_sets(training_frame, home_feature_columns=home_feature_columns)
+    rows: list[dict] = []
+
+    for feature_set_name, (features, prediction_context_mode, calibration_method) in feature_sets.items():
+        if not features:
+            continue
+        _validate_training_frame(training_frame, features)
+        estimator = _build_probability_estimator("Random Forest", calibration_method, train_df["TEAM_A_WON"])
+        estimator.fit(train_df[features], train_df["TEAM_A_WON"])
+        evaluation = _evaluate_model(estimator, test_df[features], test_df["TEAM_A_WON"])
+        probabilities = np.clip(estimator.predict_proba(test_df[features])[:, 1], 1e-15, 1 - 1e-15)
+        rows.append(
+            {
+                "feature_set": feature_set_name,
+                "model": "Random Forest",
+                "model_type": "Random Forest",
+                "calibration_method": calibration_method,
+                "prediction_context_mode": prediction_context_mode,
+                "n_features": int(len(features)),
+                "features": ",".join(features),
+                "train_seasons": ",".join(train_seasons),
+                "test_seasons": ",".join(test_seasons),
+                "train_rows": int(len(train_df)),
+                "test_rows": int(len(test_df)),
+                "roc_auc": evaluation["roc_auc"],
+                "brier_score": evaluation["brier_score"],
+                "log_loss": evaluation["log_loss"],
+                "accuracy": evaluation["accuracy"],
+                "f1": evaluation["f1"],
+                "precision": evaluation["precision"],
+                "recall": evaluation["recall"],
+                "expected_calibration_error": _expected_calibration_error(test_df["TEAM_A_WON"], probabilities),
+            }
+        )
+
+    audit = pd.DataFrame(rows)
+    if not audit.empty:
+        audit = audit.sort_values(
+            ["roc_auc", "brier_score", "log_loss", "accuracy", "f1"],
+            ascending=[False, True, True, False, False],
+            na_position="last",
+        ).reset_index(drop=True)
+        audit["audit_rank"] = range(1, len(audit) + 1)
+        audit["is_best_feature_set"] = audit["audit_rank"].eq(1)
+
+    audit_path = Path(audit_path)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit.to_csv(audit_path, index=False)
+    return audit
 
 
 def select_production_home_feature_set(home_ablation: pd.DataFrame) -> tuple[str, list[str]]:

@@ -13,6 +13,7 @@ from src.model import (
     PREDICTION_MODE_PLAYOFF,
     SERIES_CONTEXT_FEATURES,
     compare_models_by_season,
+    evaluate_calibrated_feature_audit,
     evaluate_home_feature_ablation,
     evaluate_feature_group_ablation,
     get_model_entry_for_mode,
@@ -262,6 +263,71 @@ class ModelComparisonTests(unittest.TestCase):
             for feature in SERIES_CONTEXT_FEATURES:
                 self.assertNotIn(feature, PRODUCTION_FEATURE_COLUMNS)
                 self.assertIn(feature, PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+
+    def test_calibrated_feature_audit_saves_required_columns(self):
+        rows = []
+        seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {"SEASON": season, "TEAM_A_WON": target}
+                for feature_index, feature in enumerate(FEATURE_COLUMNS):
+                    row[feature] = float(target * 2 - 1 + feature_index * 0.001)
+                row["game_number"] = float((game_index % 7) + 1)
+                row["elimination_game"] = float(game_index % 2)
+                rows.append(row)
+
+        def tiny_random_forest():
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.impute import SimpleImputer
+            from sklearn.pipeline import Pipeline
+
+            return Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("classifier", RandomForestClassifier(n_estimators=10, random_state=42, min_samples_leaf=1)),
+                ]
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = Path(tmpdir) / "calibrated_feature_audit.csv"
+            from src import model as model_module
+
+            original_builder = model_module.CALIBRATION_MODEL_BUILDERS["Random Forest"]
+            model_module.CALIBRATION_MODEL_BUILDERS["Random Forest"] = tiny_random_forest
+            try:
+                audit = evaluate_calibrated_feature_audit(
+                    pd.DataFrame(rows),
+                    train_seasons=["2021-22", "2022-23"],
+                    test_seasons=["2023-24", "2024-25"],
+                    audit_path=audit_path,
+                )
+            finally:
+                model_module.CALIBRATION_MODEL_BUILDERS["Random Forest"] = original_builder
+
+            saved = pd.read_csv(audit_path)
+            self.assertTrue(audit_path.exists())
+
+            required_columns = {
+                "feature_set",
+                "model",
+                "calibration_method",
+                "prediction_context_mode",
+                "roc_auc",
+                "brier_score",
+                "log_loss",
+                "accuracy",
+                "f1",
+                "expected_calibration_error",
+                "audit_rank",
+                "is_best_feature_set",
+            }
+            self.assertTrue(required_columns.issubset(saved.columns))
+            self.assertTrue(required_columns.issubset(audit.columns))
+            self.assertIn("current_production_features", set(saved["feature_set"]))
+            self.assertIn("production_plus_h2h", set(saved["feature_set"]))
+            self.assertIn("playoff_context_with_game_number_elimination", set(saved["feature_set"]))
+            self.assertTrue(saved["is_best_feature_set"].any())
 
     def test_top_n_feature_selection_excludes_series_context_by_default(self):
         rows = []

@@ -10,6 +10,7 @@ import pandas as pd
 from .model import (
     DIFF_COLUMNS,
     compare_models_by_season,
+    evaluate_calibrated_feature_audit,
     evaluate_home_feature_ablation,
     evaluate_feature_group_ablation,
     get_model_entry_for_mode,
@@ -153,6 +154,7 @@ def command_train(args: argparse.Namespace) -> None:
     feature_importance_path = Path(args.processed_dir) / "feature_importances.csv"
     feature_selection_path = Path(args.processed_dir) / "feature_selection.csv"
     calibration_path = Path(args.processed_dir) / "model_calibration.csv"
+    calibrated_feature_audit_path = Path(args.processed_dir) / "calibrated_feature_audit.csv"
 
     train_seasons = season_range(args.comparison_train_start, args.comparison_train_end)
     test_seasons = season_range(args.comparison_test_start, args.comparison_test_end)
@@ -198,6 +200,15 @@ def command_train(args: argparse.Namespace) -> None:
         print("Home feature ablation:")
         print(home_ablation.to_string(index=False))
         home_feature_set_name, home_feature_columns = select_production_home_feature_set(home_ablation)
+        calibrated_feature_audit = evaluate_calibrated_feature_audit(
+            training_frame=training_frame,
+            train_seasons=train_seasons,
+            test_seasons=test_seasons,
+            audit_path=calibrated_feature_audit_path,
+            home_feature_columns=home_feature_columns,
+        )
+        print("Calibrated feature audit:")
+        print(calibrated_feature_audit.to_string(index=False))
         artifact = train_production_models(
             training_frame=training_frame,
             train_seasons=train_seasons,
@@ -217,6 +228,7 @@ def command_train(args: argparse.Namespace) -> None:
         print(f"Saved model comparison to {comparison_path}")
         print(f"Saved feature ablation to {ablation_path}")
         print(f"Saved home feature ablation to {home_ablation_path}")
+        print(f"Saved calibrated feature audit to {calibrated_feature_audit_path}")
         print(f"Saved model calibration to {calibration_path}")
         print(f"Saved feature importances to {feature_importance_path}")
         print(f"Saved training data to {training_csv}")
