@@ -65,6 +65,51 @@ class ExplainabilityDirectionTests(unittest.TestCase):
         self.assertEqual(displayed.loc[0, "pushes_toward"], "NYK")
         self.assertEqual(displayed.loc[0, "model_delta_direction"], "CLE")
 
+    def test_main_factor_table_hides_empty_rows_and_keeps_source_data(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "OFF_RATING_DIFF",
+                    "value": 1.0,
+                    "importance": 0.2,
+                    "signed_contribution": 0.05,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "PACE_DIFF",
+                    "value": 0.0,
+                    "importance": 0.0,
+                    "signed_contribution": 0.0,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+            ]
+        )
+
+        displayed = display_factor_table(factors, "NYK", "CLE")
+
+        self.assertEqual(displayed["feature"].tolist(), ["OFF_RATING_DIFF"])
+        self.assertIn("PACE_DIFF", factors["feature"].tolist())
+
+    def test_model_delta_direction_hidden_when_it_matches_pushes_toward(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "OFF_RATING_DIFF",
+                    "value": 1.0,
+                    "importance": 0.2,
+                    "signed_contribution": 0.05,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                }
+            ]
+        )
+
+        displayed = display_factor_table(factors, "NYK", "CLE")
+
+        self.assertNotIn("model_delta_direction", displayed.columns)
+
     def test_seed_difference_displays_semantic_direction_for_both_orders(self):
         importances = pd.DataFrame(
             [

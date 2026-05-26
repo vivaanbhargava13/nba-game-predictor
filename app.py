@@ -495,14 +495,26 @@ def factor_chart(
     return fig
 
 
-def display_factor_table(factors: pd.DataFrame, team_a_abbreviation: str, team_b_abbreviation: str) -> pd.DataFrame:
+def display_factor_table(
+    factors: pd.DataFrame,
+    team_a_abbreviation: str,
+    team_b_abbreviation: str,
+    hide_empty_rows: bool = True,
+) -> pd.DataFrame:
     columns = ["feature", "value", "importance", "signed_contribution", "model_delta_direction", "pushes_toward"]
-    view = factors.head(10)[[column for column in columns if column in factors.columns]].copy()
+    source = factors.copy()
+    if hide_empty_rows and {"importance", "signed_contribution"}.issubset(source.columns):
+        importance = pd.to_numeric(source["importance"], errors="coerce").fillna(0.0)
+        contribution = pd.to_numeric(source["signed_contribution"], errors="coerce").fillna(0.0)
+        source = source[~(importance.eq(0.0) & contribution.eq(0.0))].copy()
+    view = source.head(10)[[column for column in columns if column in source.columns]].copy()
     direction_labels = {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
     if "pushes_toward" in view.columns:
         view["pushes_toward"] = view["pushes_toward"].replace(direction_labels)
     if "model_delta_direction" in view.columns:
         view["model_delta_direction"] = view["model_delta_direction"].replace(direction_labels)
+        if "pushes_toward" not in view.columns or view["model_delta_direction"].eq(view["pushes_toward"]).all():
+            view = view.drop(columns=["model_delta_direction"])
     return view.rename(
         columns={
             "feature": "feature",
