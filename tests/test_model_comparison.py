@@ -309,7 +309,13 @@ class ModelComparisonTests(unittest.TestCase):
                 model_module.CALIBRATION_MODEL_BUILDERS["Random Forest"] = original_builder
 
             saved = pd.read_csv(audit_path)
+            focused_path = Path(tmpdir) / "elo_carryover_focused_audit.csv"
+            summary_path = Path(tmpdir) / "elo_carryover_feature_summary.csv"
+            correlation_path = Path(tmpdir) / "elo_carryover_feature_correlation.csv"
             self.assertTrue(audit_path.exists())
+            self.assertTrue(focused_path.exists())
+            self.assertTrue(summary_path.exists())
+            self.assertTrue(correlation_path.exists())
 
             required_columns = {
                 "feature_set",
@@ -329,8 +335,45 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertTrue(required_columns.issubset(audit.columns))
             self.assertIn("current_production_features", set(saved["feature_set"]))
             self.assertIn("production_plus_h2h", set(saved["feature_set"]))
+            self.assertIn("production_plus_season_reset_elo", set(saved["feature_set"]))
+            self.assertIn("production_plus_rest", set(saved["feature_set"]))
+            self.assertIn("production_plus_rolling_form", set(saved["feature_set"]))
+            self.assertIn("production_plus_elo_rest_rolling_form", set(saved["feature_set"]))
+            self.assertIn("production_plus_offseason_regressed_elo_0_25", set(saved["feature_set"]))
+            self.assertIn("production_plus_offseason_regressed_elo_0_5", set(saved["feature_set"]))
             self.assertIn("playoff_context_with_game_number_elimination", set(saved["feature_set"]))
             self.assertTrue(saved["is_best_feature_set"].any())
+            focused = pd.read_csv(focused_path)
+            focused_required_columns = {
+                "feature_set",
+                "roc_auc",
+                "brier_score",
+                "log_loss",
+                "expected_calibration_error",
+            }
+            self.assertTrue(focused_required_columns.issubset(focused.columns))
+            self.assertEqual(
+                set(focused["feature_set"]),
+                {
+                    "current_production_features",
+                    "production_plus_carryover_0_25_only",
+                    "production_plus_carryover_0_5_only",
+                },
+            )
+            summary = pd.read_csv(summary_path)
+            self.assertTrue(
+                {
+                    "season_elo_diff_carryover_0_25",
+                    "season_elo_diff_carryover_0_5",
+                }.issubset(set(summary["feature"]))
+            )
+            correlations = pd.read_csv(correlation_path)
+            carryover_pair = correlations[
+                correlations["feature_x"].eq("season_elo_diff_carryover_0_25")
+                & correlations["feature_y"].eq("season_elo_diff_carryover_0_5")
+            ]
+            self.assertFalse(carryover_pair.empty)
+            self.assertFalse(bool(carryover_pair.iloc[0]["identical_values"]))
 
     def test_top_n_feature_selection_excludes_series_context_by_default(self):
         rows = []

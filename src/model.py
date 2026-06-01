@@ -25,7 +25,14 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from .nba_data import FEATURE_COLUMNS, TIER_1_FEATURES, TIER_3_FEATURES, TIER_4_FEATURES, TIER_8_FEATURES, TIER_10_FEATURES
+from .nba_data import (
+    FEATURE_COLUMNS,
+    TIER_1_FEATURES,
+    TIER_3_FEATURES,
+    TIER_4_FEATURES,
+    TIER_8_FEATURES,
+    TIER_10_FEATURES,
+)
 
 
 DIFF_COLUMNS = FEATURE_COLUMNS
@@ -35,6 +42,24 @@ WEIGHTED_RECENT_FEATURES = [
     "weighted_recent_net_rating_diff",
     "weighted_recent_ts_pct_diff",
     "weighted_recent_def_rating_diff",
+]
+SEASON_RESET_ELO_FEATURES = ["team_A_season_elo", "team_B_season_elo", "season_elo_diff"]
+OFFSEASON_REGRESSED_ELO_FEATURES = {
+    0.25: ["season_elo_diff_carryover_0_25"],
+    0.5: ["season_elo_diff_carryover_0_5"],
+}
+OFFSEASON_REGRESSED_ELO_COLUMNS = [
+    "season_elo_diff_carryover_0_25",
+    "season_elo_diff_carryover_0_5",
+]
+REST_BACK_TO_BACK_FEATURES = ["rest_days_A", "rest_days_B", "rest_diff", "is_back_to_back_A", "is_back_to_back_B"]
+ROLLING_RECENT_FORM_AUDIT_FEATURES = [
+    "last_3_win_pct_diff",
+    "last_5_win_pct_diff",
+    "last_10_win_pct_diff",
+    "last_5_net_rating_diff",
+    "last_10_net_rating_diff",
+    "weighted_recent_point_diff",
 ]
 SEED_DIRECTION_FEATURES = ["seed_difference", "higher_seed_A"]
 SERIES_CONTEXT_FEATURES = ["game_number", "elimination_game"]
@@ -765,6 +790,39 @@ def build_calibrated_feature_audit_sets(
             PREDICTION_MODE_CURRENT,
             current_calibration,
         ),
+        "production_plus_season_reset_elo": (
+            _available_features(production + SEASON_RESET_ELO_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_rest": (
+            _available_features(production + REST_BACK_TO_BACK_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_rolling_form": (
+            _available_features(production + ROLLING_RECENT_FORM_AUDIT_FEATURES, training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_elo_rest_rolling_form": (
+            _available_features(
+                production + SEASON_RESET_ELO_FEATURES + REST_BACK_TO_BACK_FEATURES + ROLLING_RECENT_FORM_AUDIT_FEATURES,
+                training_frame,
+            ),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_offseason_regressed_elo_0_25": (
+            _available_features(production + OFFSEASON_REGRESSED_ELO_FEATURES[0.25], training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
+        "production_plus_offseason_regressed_elo_0_5": (
+            _available_features(production + OFFSEASON_REGRESSED_ELO_FEATURES[0.5], training_frame),
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
         "production_plus_star_player_features": (
             _available_features(production + TIER_3_FEATURES, training_frame),
             PREDICTION_MODE_CURRENT,
@@ -855,7 +913,158 @@ def evaluate_calibrated_feature_audit(
     audit_path = Path(audit_path)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit.to_csv(audit_path, index=False)
+    production = _available_features(
+        TIER_1_FEATURES + (home_feature_columns or HOME_ADVANTAGE_FEATURES) + SEED_DIRECTION_FEATURES,
+        training_frame,
+    )
+    focused_audit = evaluate_focused_elo_carryover_audit(
+        training_frame=training_frame,
+        train_seasons=train_seasons,
+        test_seasons=test_seasons,
+        audit_path=audit_path.with_name("elo_carryover_focused_audit.csv"),
+        production_features=production,
+    )
+    _save_elo_carryover_feature_diagnostics(
+        training_frame=training_frame,
+        production_features=production,
+        summary_path=audit_path.with_name("elo_carryover_feature_summary.csv"),
+        correlation_path=audit_path.with_name("elo_carryover_feature_correlation.csv"),
+    )
     return audit
+
+
+def _evaluate_calibrated_random_forest_sets(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_sets: dict[str, list[str]],
+    train_seasons: list[str],
+    test_seasons: list[str],
+    calibration_method: str,
+    prediction_context_mode: str = PREDICTION_MODE_CURRENT,
+) -> pd.DataFrame:
+    rows: list[dict] = []
+    for feature_set_name, features in feature_sets.items():
+        if not features:
+            continue
+        estimator = _build_probability_estimator("Random Forest", calibration_method, train_df["TEAM_A_WON"])
+        estimator.fit(train_df[features], train_df["TEAM_A_WON"])
+        evaluation = _evaluate_model(estimator, test_df[features], test_df["TEAM_A_WON"])
+        probabilities = np.clip(estimator.predict_proba(test_df[features])[:, 1], 1e-15, 1 - 1e-15)
+        rows.append(
+            {
+                "feature_set": feature_set_name,
+                "model": "Random Forest",
+                "model_type": "Random Forest",
+                "calibration_method": calibration_method,
+                "prediction_context_mode": prediction_context_mode,
+                "n_features": int(len(features)),
+                "features": ",".join(features),
+                "train_seasons": ",".join(train_seasons),
+                "test_seasons": ",".join(test_seasons),
+                "train_rows": int(len(train_df)),
+                "test_rows": int(len(test_df)),
+                "roc_auc": evaluation["roc_auc"],
+                "brier_score": evaluation["brier_score"],
+                "log_loss": evaluation["log_loss"],
+                "accuracy": evaluation["accuracy"],
+                "f1": evaluation["f1"],
+                "precision": evaluation["precision"],
+                "recall": evaluation["recall"],
+                "expected_calibration_error": _expected_calibration_error(test_df["TEAM_A_WON"], probabilities),
+            }
+        )
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(
+            ["roc_auc", "brier_score", "log_loss"],
+            ascending=[False, True, True],
+            na_position="last",
+        ).reset_index(drop=True)
+        result["focused_audit_rank"] = range(1, len(result) + 1)
+    return result
+
+
+def evaluate_focused_elo_carryover_audit(
+    training_frame: pd.DataFrame,
+    train_seasons: list[str],
+    test_seasons: list[str],
+    audit_path: str | Path,
+    production_features: list[str] | None = None,
+) -> pd.DataFrame:
+    """Focused calibrated Random Forest audit for offseason-regressed Elo variants."""
+    production_features = production_features or _available_features(PRODUCTION_FEATURE_COLUMNS, training_frame)
+    feature_sets = {
+        "current_production_features": _available_features(production_features, training_frame),
+        "production_plus_carryover_0_25_only": _available_features(
+            production_features + ["season_elo_diff_carryover_0_25"],
+            training_frame,
+        ),
+        "production_plus_carryover_0_5_only": _available_features(
+            production_features + ["season_elo_diff_carryover_0_5"],
+            training_frame,
+        ),
+    }
+    for features in feature_sets.values():
+        _validate_training_frame(training_frame, features)
+    train_df, test_df = _season_split(training_frame, train_seasons, test_seasons)
+    result = _evaluate_calibrated_random_forest_sets(
+        train_df=train_df,
+        test_df=test_df,
+        feature_sets=feature_sets,
+        train_seasons=train_seasons,
+        test_seasons=test_seasons,
+        calibration_method=PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][1],
+    )
+    audit_path = Path(audit_path)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(audit_path, index=False)
+    return result
+
+
+def _save_elo_carryover_feature_diagnostics(
+    training_frame: pd.DataFrame,
+    production_features: list[str],
+    summary_path: str | Path,
+    correlation_path: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Save summary stats and pairwise correlations for production and carryover Elo features."""
+    diagnostic_features = _available_features(production_features + OFFSEASON_REGRESSED_ELO_COLUMNS, training_frame)
+    numeric = training_frame[diagnostic_features].apply(pd.to_numeric, errors="coerce")
+    summary = numeric.describe().T.reset_index().rename(columns={"index": "feature"})
+    summary["missing_count"] = numeric.isna().sum().reindex(summary["feature"]).to_numpy()
+    summary["nunique"] = numeric.nunique(dropna=True).reindex(summary["feature"]).to_numpy()
+
+    correlation_rows: list[dict] = []
+    corr = numeric.corr()
+    for left in diagnostic_features:
+        for right in diagnostic_features:
+            if left == right:
+                continue
+            paired = numeric[[left, right]].dropna()
+            mean_abs_difference = np.nan
+            identical_values = False
+            if not paired.empty:
+                difference = (paired[left] - paired[right]).abs()
+                mean_abs_difference = float(difference.mean())
+                identical_values = bool(difference.eq(0).all())
+            correlation_rows.append(
+                {
+                    "feature_x": left,
+                    "feature_y": right,
+                    "correlation": corr.loc[left, right] if left in corr.index and right in corr.columns else np.nan,
+                    "mean_abs_difference": mean_abs_difference,
+                    "identical_values": identical_values,
+                }
+            )
+    correlations = pd.DataFrame(correlation_rows)
+
+    summary_path = Path(summary_path)
+    correlation_path = Path(correlation_path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    correlation_path.parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(summary_path, index=False)
+    correlations.to_csv(correlation_path, index=False)
+    return summary, correlations
 
 
 def select_production_home_feature_set(home_ablation: pd.DataFrame) -> tuple[str, list[str]]:

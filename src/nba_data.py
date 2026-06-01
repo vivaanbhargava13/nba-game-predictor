@@ -27,6 +27,7 @@ TEAM_STRENGTH_COLUMNS = [
 TEAM_ID_COLUMNS = ["TEAM_ID", "TEAM_NAME", "TEAM_ABBREVIATION"]
 TIER_1_FEATURES = [f"{column}_DIFF" for column in TEAM_STRENGTH_COLUMNS]
 TIER_2_FEATURES = [
+    "last_3_win_pct_diff",
     "last_5_win_pct_diff",
     "last_10_win_pct_diff",
     "last_5_net_rating_diff",
@@ -35,6 +36,7 @@ TIER_2_FEATURES = [
     "last_10_point_diff_diff",
     "weighted_recent_win_pct_diff",
     "weighted_recent_net_rating_diff",
+    "weighted_recent_point_diff",
     "weighted_recent_ts_pct_diff",
     "weighted_recent_def_rating_diff",
 ]
@@ -58,8 +60,24 @@ TIER_4_FEATURES = [
     "clipped_home_win_pct_diff",
     "clipped_away_win_pct_diff",
 ]
-TIER_5_FEATURES = ["rest_days_diff", "team_A_rest_days", "team_B_rest_days"]
-TIER_6_FEATURES = ["elo_diff"]
+TIER_5_FEATURES = [
+    "rest_days_diff",
+    "team_A_rest_days",
+    "team_B_rest_days",
+    "rest_days_A",
+    "rest_days_B",
+    "rest_diff",
+    "is_back_to_back_A",
+    "is_back_to_back_B",
+]
+TIER_6_FEATURES = [
+    "elo_diff",
+    "team_A_season_elo",
+    "team_B_season_elo",
+    "season_elo_diff",
+    "season_elo_diff_carryover_0_25",
+    "season_elo_diff_carryover_0_5",
+]
 TIER_7_FEATURES = [
     "efg_pct_diff",
     "ts_pct_diff",
@@ -99,7 +117,7 @@ MODEL_FEATURE_COLUMNS = (
     + TIER_9_FEATURES
     + TIER_10_FEATURES
 )
-FEATURE_SCHEMA_VERSION = "2026-05-24-feature-v5-home-context-models"
+FEATURE_SCHEMA_VERSION = "2026-05-26-feature-v7-cross-season-carryover-elo-audit"
 
 # Human-readable notes for the expanded model. The code below follows these
 # definitions so every training and prediction path uses the same feature math.
@@ -113,6 +131,7 @@ FEATURE_DESCRIPTIONS = {
     "PACE_DIFF": "Team A pace minus Team B pace.",
     # Tier 2: recent form from TeamGameLog games strictly before prediction date.
     "last_5_win_pct_diff": "Team A last 5 win percentage minus Team B last 5 win percentage.",
+    "last_3_win_pct_diff": "Team A last 3 win percentage minus Team B last 3 win percentage.",
     "last_10_win_pct_diff": "Team A last 10 win percentage minus Team B last 10 win percentage.",
     "last_5_net_rating_diff": "Team A last 5 estimated net rating minus Team B last 5 estimated net rating.",
     "last_10_net_rating_diff": "Team A last 10 estimated net rating minus Team B last 10 estimated net rating.",
@@ -120,6 +139,7 @@ FEATURE_DESCRIPTIONS = {
     "last_10_point_diff_diff": "Team A last 10 average point differential minus Team B last 10 average point differential.",
     "weighted_recent_win_pct_diff": "Team A weighted recent win percentage minus Team B weighted recent win percentage.",
     "weighted_recent_net_rating_diff": "Team A weighted recent net rating minus Team B weighted recent net rating.",
+    "weighted_recent_point_diff": "Team A weighted recent point differential minus Team B weighted recent point differential.",
     "weighted_recent_ts_pct_diff": "Team A weighted recent true shooting percentage minus Team B weighted recent true shooting percentage.",
     "weighted_recent_def_rating_diff": "Team B weighted recent defensive rating minus Team A weighted recent defensive rating; positive favors Team A.",
     # Tier 3: star power from regular-season player averages before prediction date.
@@ -144,7 +164,17 @@ FEATURE_DESCRIPTIONS = {
     "rest_days_diff": "Team A rest days minus Team B rest days.",
     "team_A_rest_days": "Days since Team A's previous game.",
     "team_B_rest_days": "Days since Team B's previous game.",
+    "rest_days_A": "Days since Team A's previous game.",
+    "rest_days_B": "Days since Team B's previous game.",
+    "rest_diff": "Team A rest days minus Team B rest days.",
+    "is_back_to_back_A": "1 when Team A played the previous day, otherwise 0.",
+    "is_back_to_back_B": "1 when Team B played the previous day, otherwise 0.",
     "elo_diff": "Team A pre-game Elo minus Team B pre-game Elo.",
+    "team_A_season_elo": "Team A season-reset pre-game Elo.",
+    "team_B_season_elo": "Team B season-reset pre-game Elo.",
+    "season_elo_diff": "Team A season-reset pre-game Elo minus Team B season-reset pre-game Elo.",
+    "season_elo_diff_carryover_0_25": "Team A minus Team B pre-game Elo with 25% offseason carryover regression to 1500.",
+    "season_elo_diff_carryover_0_5": "Team A minus Team B pre-game Elo with 50% offseason carryover regression to 1500.",
     "efg_pct_diff": "Team A prior effective field goal percentage minus Team B prior effective field goal percentage.",
     "ts_pct_diff": "Team A prior true shooting percentage minus Team B prior true shooting percentage.",
     "turnover_pct_diff": "Team A prior turnover percentage minus Team B prior turnover percentage.",
@@ -525,6 +555,8 @@ def _recent_form_features(
 ) -> dict[str, float]:
     # Tier 2 features: rolling form from only games before prediction_date.
     return {
+        "last_3_win_pct_diff": _recent_form_value(team_a_games, 3, "WON")
+        - _recent_form_value(team_b_games, 3, "WON"),
         "last_5_win_pct_diff": _recent_form_value(team_a_games, 5, "WON")
         - _recent_form_value(team_b_games, 5, "WON"),
         "last_10_win_pct_diff": _recent_form_value(team_a_games, 10, "WON")
@@ -600,6 +632,8 @@ def _weighted_recent_features(team_a_games: pd.DataFrame, team_b_games: pd.DataF
         "weighted_recent_win_pct_diff": _weighted_mean(team_a_recent["WON"]) - _weighted_mean(team_b_recent["WON"]),
         "weighted_recent_net_rating_diff": _weighted_mean(team_a_recent["NET_RATING_GAME"])
         - _weighted_mean(team_b_recent["NET_RATING_GAME"]),
+        "weighted_recent_point_diff": _weighted_mean(team_a_recent["POINT_DIFF"])
+        - _weighted_mean(team_b_recent["POINT_DIFF"]),
         "weighted_recent_ts_pct_diff": _weighted_mean(team_a_ts) - _weighted_mean(team_b_ts),
         "weighted_recent_def_rating_diff": _weighted_mean(team_b_recent["DEF_RATING_GAME"])
         - _weighted_mean(team_a_recent["DEF_RATING_GAME"]),
@@ -717,62 +751,118 @@ def _rest_features(
         "rest_days_diff": team_a_rest - team_b_rest,
         "team_A_rest_days": team_a_rest,
         "team_B_rest_days": team_b_rest,
+        "rest_days_A": team_a_rest,
+        "rest_days_B": team_b_rest,
+        "rest_diff": team_a_rest - team_b_rest,
+        "is_back_to_back_A": float(int(team_a_rest <= 1.0)) if not pd.isna(team_a_rest) else np.nan,
+        "is_back_to_back_B": float(int(team_b_rest <= 1.0)) if not pd.isna(team_b_rest) else np.nan,
     }
 
 
-def compute_elo_snapshots(game_logs: pd.DataFrame, k_factor: float = 20.0) -> dict[tuple[str, int], float]:
-    """Return pre-game Elo for each (GAME_ID, TEAM_ID), resetting all teams to 1500 per season load."""
+def _season_order(game_logs: pd.DataFrame) -> list:
+    if "SEASON" not in game_logs.columns:
+        return ["__single_season__"]
+    return (
+        game_logs.groupby("SEASON")["GAME_DATE"]
+        .min()
+        .sort_values()
+        .index
+        .tolist()
+    )
+
+
+def _season_frame(game_logs: pd.DataFrame, season) -> pd.DataFrame:
+    if "SEASON" not in game_logs.columns:
+        return game_logs
+    return game_logs[game_logs["SEASON"].eq(season)].copy()
+
+
+def compute_elo_snapshots(
+    game_logs: pd.DataFrame,
+    k_factor: float = 20.0,
+    carryover_weight: float = 0.0,
+) -> dict[tuple[str, int], float]:
+    """Return pre-game Elo for each (GAME_ID, TEAM_ID), resetting at each season.
+
+    carryover_weight=0.0 is a true season reset. Larger values regress the
+    previous season ending Elo toward 1500 before the new season starts.
+    """
     if game_logs.empty:
         return {}
 
     snapshots: dict[tuple[str, int], float] = {}
-    ratings = {int(team_id): 1500.0 for team_id in game_logs["TEAM_ID"].dropna().unique()}
-    game_rows = game_logs.sort_values(["GAME_DATE", "GAME_ID"]).groupby("GAME_ID", sort=False)
+    ending_ratings: dict[int, float] = {}
+    for season in _season_order(game_logs):
+        season_logs = _season_frame(game_logs, season)
+        teams_in_season = [int(team_id) for team_id in season_logs["TEAM_ID"].dropna().unique()]
+        ratings = {
+            team_id: 1500.0 + float(carryover_weight) * (ending_ratings.get(team_id, 1500.0) - 1500.0)
+            for team_id in teams_in_season
+        }
+        game_rows = season_logs.sort_values(["GAME_DATE", "GAME_ID"]).groupby("GAME_ID", sort=False)
 
-    for game_id, group in game_rows:
-        if len(group) < 2:
-            continue
+        for game_id, group in game_rows:
+            if len(group) < 2:
+                continue
 
-        teams_in_game = group.sort_values("TEAM_ID").head(2)
-        row_a = teams_in_game.iloc[0]
-        row_b = teams_in_game.iloc[1]
-        team_a_id = int(row_a["TEAM_ID"])
-        team_b_id = int(row_b["TEAM_ID"])
-        rating_a = ratings.get(team_a_id, 1500.0)
-        rating_b = ratings.get(team_b_id, 1500.0)
-        snapshots[(str(game_id), team_a_id)] = rating_a
-        snapshots[(str(game_id), team_b_id)] = rating_b
+            teams_in_game = group.sort_values("TEAM_ID").head(2)
+            row_a = teams_in_game.iloc[0]
+            row_b = teams_in_game.iloc[1]
+            team_a_id = int(row_a["TEAM_ID"])
+            team_b_id = int(row_b["TEAM_ID"])
+            rating_a = ratings.get(team_a_id, 1500.0)
+            rating_b = ratings.get(team_b_id, 1500.0)
+            snapshots[(str(game_id), team_a_id)] = rating_a
+            snapshots[(str(game_id), team_b_id)] = rating_b
 
-        expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-        actual_a = float(row_a["WON"])
-        actual_b = 1.0 - actual_a
-        expected_b = 1.0 - expected_a
-        ratings[team_a_id] = rating_a + k_factor * (actual_a - expected_a)
-        ratings[team_b_id] = rating_b + k_factor * (actual_b - expected_b)
+            expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
+            actual_a = float(row_a["WON"])
+            actual_b = 1.0 - actual_a
+            expected_b = 1.0 - expected_a
+            ratings[team_a_id] = rating_a + k_factor * (actual_a - expected_a)
+            ratings[team_b_id] = rating_b + k_factor * (actual_b - expected_b)
+
+        ending_ratings.update(ratings)
 
     return snapshots
 
 
-def compute_current_elos(game_logs: pd.DataFrame, prediction_date: pd.Timestamp, k_factor: float = 20.0) -> dict[int, float]:
-    """Return Elo after all games before prediction_date."""
-    ratings = {int(team_id): 1500.0 for team_id in game_logs["TEAM_ID"].dropna().unique()}
-    prior_logs = game_logs[game_logs["GAME_DATE"] < prediction_date]
+def compute_current_elos(
+    game_logs: pd.DataFrame,
+    prediction_date: pd.Timestamp,
+    k_factor: float = 20.0,
+    carryover_weight: float = 0.0,
+) -> dict[int, float]:
+    """Return Elo after games before prediction_date, resetting at season boundaries."""
+    prior_logs = game_logs[game_logs["GAME_DATE"] < prediction_date].copy()
+    if prior_logs.empty:
+        return {int(team_id): 1500.0 for team_id in game_logs["TEAM_ID"].dropna().unique()}
 
-    for _, group in prior_logs.sort_values(["GAME_DATE", "GAME_ID"]).groupby("GAME_ID", sort=False):
-        if len(group) < 2:
-            continue
+    ending_ratings: dict[int, float] = {}
+    ratings: dict[int, float] = {}
+    for season in _season_order(prior_logs):
+        season_logs = _season_frame(prior_logs, season)
+        teams_in_season = [int(team_id) for team_id in season_logs["TEAM_ID"].dropna().unique()]
+        ratings = {
+            team_id: 1500.0 + float(carryover_weight) * (ending_ratings.get(team_id, 1500.0) - 1500.0)
+            for team_id in teams_in_season
+        }
+        for _, group in season_logs.sort_values(["GAME_DATE", "GAME_ID"]).groupby("GAME_ID", sort=False):
+            if len(group) < 2:
+                continue
 
-        teams_in_game = group.sort_values("TEAM_ID").head(2)
-        row_a = teams_in_game.iloc[0]
-        row_b = teams_in_game.iloc[1]
-        team_a_id = int(row_a["TEAM_ID"])
-        team_b_id = int(row_b["TEAM_ID"])
-        rating_a = ratings.get(team_a_id, 1500.0)
-        rating_b = ratings.get(team_b_id, 1500.0)
-        expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-        actual_a = float(row_a["WON"])
-        ratings[team_a_id] = rating_a + k_factor * (actual_a - expected_a)
-        ratings[team_b_id] = rating_b + k_factor * ((1.0 - actual_a) - (1.0 - expected_a))
+            teams_in_game = group.sort_values("TEAM_ID").head(2)
+            row_a = teams_in_game.iloc[0]
+            row_b = teams_in_game.iloc[1]
+            team_a_id = int(row_a["TEAM_ID"])
+            team_b_id = int(row_b["TEAM_ID"])
+            rating_a = ratings.get(team_a_id, 1500.0)
+            rating_b = ratings.get(team_b_id, 1500.0)
+            expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
+            actual_a = float(row_a["WON"])
+            ratings[team_a_id] = rating_a + k_factor * (actual_a - expected_a)
+            ratings[team_b_id] = rating_b + k_factor * ((1.0 - actual_a) - (1.0 - expected_a))
+        ending_ratings.update(ratings)
 
     return ratings
 
@@ -783,17 +873,42 @@ def _elo_features(
     prediction_date: pd.Timestamp,
     game_logs: pd.DataFrame,
     elo_snapshots: dict[tuple[str, int], float] | None = None,
+    elo_carryover_snapshots: dict[float, dict[tuple[str, int], float]] | None = None,
     game_id: str | None = None,
 ) -> dict[str, float]:
     if elo_snapshots and game_id is not None:
-        elo_a = elo_snapshots.get((str(game_id), int(team_a_id)), 1500.0)
-        elo_b = elo_snapshots.get((str(game_id), int(team_b_id)), 1500.0)
-        return {"elo_diff": elo_a - elo_b}
+        key_a = (str(game_id), int(team_a_id))
+        key_b = (str(game_id), int(team_b_id))
+        if key_a in elo_snapshots and key_b in elo_snapshots:
+            elo_a = elo_snapshots[key_a]
+            elo_b = elo_snapshots[key_b]
+        else:
+            current_elos = compute_current_elos(game_logs, prediction_date)
+            elo_a = current_elos.get(int(team_a_id), 1500.0)
+            elo_b = current_elos.get(int(team_b_id), 1500.0)
+    else:
+        current_elos = compute_current_elos(game_logs, prediction_date)
+        elo_a = current_elos.get(int(team_a_id), 1500.0)
+        elo_b = current_elos.get(int(team_b_id), 1500.0)
 
-    current_elos = compute_current_elos(game_logs, prediction_date)
-    elo_a = current_elos.get(int(team_a_id), 1500.0)
-    elo_b = current_elos.get(int(team_b_id), 1500.0)
-    return {"elo_diff": elo_a - elo_b}
+    features = {
+        "elo_diff": elo_a - elo_b,
+        "team_A_season_elo": elo_a,
+        "team_B_season_elo": elo_b,
+        "season_elo_diff": elo_a - elo_b,
+    }
+    carryover_sources = elo_carryover_snapshots or {}
+    for weight, feature_name in [(0.25, "season_elo_diff_carryover_0_25"), (0.5, "season_elo_diff_carryover_0_5")]:
+        snapshots = carryover_sources.get(weight)
+        if snapshots and game_id is not None:
+            carryover_a = snapshots.get((str(game_id), int(team_a_id)), elo_a)
+            carryover_b = snapshots.get((str(game_id), int(team_b_id)), elo_b)
+        else:
+            current_elos = compute_current_elos(game_logs, prediction_date, carryover_weight=weight)
+            carryover_a = current_elos.get(int(team_a_id), elo_a)
+            carryover_b = current_elos.get(int(team_b_id), elo_b)
+        features[feature_name] = carryover_a - carryover_b
+    return features
 
 
 def _head_to_head_features(
@@ -967,6 +1082,7 @@ def build_matchup_feature_row(
     playoff_games: pd.DataFrame | None = None,
     seeds: dict[int, int] | None = None,
     elo_snapshots: dict[tuple[str, int], float] | None = None,
+    elo_carryover_snapshots: dict[float, dict[tuple[str, int], float]] | None = None,
     game_id: str | None = None,
     include_playoff_context: bool = False,
     user_series_context: dict[str, float] | None = None,
@@ -1013,7 +1129,15 @@ def build_matchup_feature_row(
         **_star_power_features(player_stats_a, player_stats_b),
         **_home_court_features(team_a_games, team_b_games, team_a_id, home_team_id),
         **_rest_features(team_a_games, team_b_games, prediction_date),
-        **_elo_features(team_a_id, team_b_id, prediction_date, game_logs, elo_snapshots, game_id),
+        **_elo_features(
+            team_a_id,
+            team_b_id,
+            prediction_date,
+            game_logs,
+            elo_snapshots,
+            elo_carryover_snapshots,
+            game_id,
+        ),
         **_efficiency_features(team_a_games, team_b_games),
         **_head_to_head_features(team_a_games, team_b_id),
         **(
@@ -1082,6 +1206,10 @@ def _build_training_frame_for_season(
     player_stats = load_player_stats_before_date(season, games["GAME_DATE"].max(), cache_dir)
     seeds = load_team_seeds(season, cache_dir)
     elo_snapshots = compute_elo_snapshots(game_logs)
+    elo_carryover_snapshots = {
+        0.25: compute_elo_snapshots(game_logs, carryover_weight=0.25),
+        0.5: compute_elo_snapshots(game_logs, carryover_weight=0.5),
+    }
     playoff_groups = list(games.groupby("GAME_ID"))
 
     for index, (game_id, group) in enumerate(playoff_groups, start=1):
@@ -1111,6 +1239,7 @@ def _build_training_frame_for_season(
                 playoff_games=games,
                 seeds=seeds,
                 elo_snapshots=elo_snapshots,
+                elo_carryover_snapshots=elo_carryover_snapshots,
                 game_id=str(game_id),
                 include_playoff_context=True,
             )
@@ -1133,6 +1262,60 @@ def _build_training_frame_for_season(
         rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+def _apply_cross_season_carryover_elo_features(
+    training_frame: pd.DataFrame,
+    seasons: Iterable[str],
+    cache_dir: str | Path,
+    feature_season_type: str,
+) -> pd.DataFrame:
+    """Recompute offseason-regressed Elo audit columns across the full season span."""
+    if training_frame.empty:
+        return training_frame
+    required = {"SEASON", "GAME_DATE", "TEAM_A_ID", "TEAM_B_ID"}
+    if not required.issubset(training_frame.columns):
+        return training_frame
+
+    log_frames: list[pd.DataFrame] = []
+    for season in seasons:
+        try:
+            logs = load_all_team_game_logs(season, cache_dir, season_types=(feature_season_type,))
+        except Exception as exc:
+            print(f"Could not load logs for cross-season Elo carryover {season}: {exc}")
+            continue
+        if logs.empty:
+            continue
+        logs = logs.copy()
+        logs["SEASON"] = season
+        log_frames.append(logs)
+
+    if not log_frames:
+        return training_frame
+
+    all_logs = pd.concat(log_frames, ignore_index=True)
+    all_logs["GAME_DATE"] = pd.to_datetime(all_logs["GAME_DATE"])
+    adjusted = training_frame.copy()
+    adjusted["GAME_DATE"] = pd.to_datetime(adjusted["GAME_DATE"])
+
+    for weight, column in [
+        (0.25, "season_elo_diff_carryover_0_25"),
+        (0.5, "season_elo_diff_carryover_0_5"),
+    ]:
+        adjusted[column] = np.nan
+        for season, season_rows in adjusted.groupby("SEASON", sort=False):
+            prediction_date = pd.Timestamp(season_rows["GAME_DATE"].min())
+            ratings = compute_current_elos(
+                all_logs,
+                prediction_date,
+                carryover_weight=weight,
+            )
+            adjusted.loc[season_rows.index, column] = [
+                ratings.get(int(row["TEAM_A_ID"]), 1500.0) - ratings.get(int(row["TEAM_B_ID"]), 1500.0)
+                for _, row in season_rows.iterrows()
+            ]
+
+    return adjusted
 
 
 def load_team_directory() -> pd.DataFrame:
@@ -1210,6 +1393,19 @@ def load_training_frame(
         return pd.DataFrame()
 
     training_frame = pd.concat(frames, ignore_index=True)
+    training_frame = _apply_cross_season_carryover_elo_features(
+        training_frame,
+        seasons=seasons,
+        cache_dir=cache_dir,
+        feature_season_type=feature_season_type,
+    )
+    training_frame["FEATURE_SCHEMA_VERSION"] = FEATURE_SCHEMA_VERSION
+    for season in seasons:
+        season_rows = training_frame[training_frame["SEASON"].astype(str).eq(str(season))]
+        if season_rows.empty:
+            continue
+        season_path = _season_training_path(processed_dir, season, feature_season_type)
+        season_rows.to_csv(season_path, index=False)
     training_frame.to_csv(combined_path, index=False)
     print(f"Saved processed training data to {combined_path}")
     return training_frame

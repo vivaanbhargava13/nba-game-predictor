@@ -8,6 +8,9 @@ from src.nba_data import (
     _games_before_date,
     _head_to_head_features,
     _playoff_context_features,
+    _recent_form_features,
+    _rest_features,
+    _weighted_recent_features,
     compute_elo_snapshots,
     user_playoff_series_context_features,
 )
@@ -18,6 +21,18 @@ class NextStepFeatureTests(unittest.TestCase):
     def test_new_features_are_in_feature_columns(self):
         for feature in [
             "elo_diff",
+            "team_A_season_elo",
+            "team_B_season_elo",
+            "season_elo_diff",
+            "season_elo_diff_carryover_0_25",
+            "season_elo_diff_carryover_0_5",
+            "rest_days_A",
+            "rest_days_B",
+            "rest_diff",
+            "is_back_to_back_A",
+            "is_back_to_back_B",
+            "last_3_win_pct_diff",
+            "weighted_recent_point_diff",
             "efg_pct_diff",
             "ts_pct_diff",
             "turnover_pct_diff",
@@ -81,6 +96,113 @@ class NextStepFeatureTests(unittest.TestCase):
         self.assertEqual(snapshots[("g1", 2)], 1500.0)
         self.assertNotEqual(snapshots[("g2", 1)], 1500.0)
         self.assertNotEqual(snapshots[("g2", 2)], 1500.0)
+
+    def test_elo_resets_to_1500_at_each_season_start(self):
+        logs = pd.DataFrame(
+            [
+                {"SEASON": "2021-22", "TEAM_ID": 1, "GAME_ID": "s1g1", "GAME_DATE": "2021-10-01", "WON": 1},
+                {"SEASON": "2021-22", "TEAM_ID": 2, "GAME_ID": "s1g1", "GAME_DATE": "2021-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 1, "GAME_ID": "s2g1", "GAME_DATE": "2022-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 2, "GAME_ID": "s2g1", "GAME_DATE": "2022-10-01", "WON": 1},
+            ]
+        )
+        logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+
+        snapshots = compute_elo_snapshots(logs, carryover_weight=0.0)
+
+        self.assertEqual(snapshots[("s1g1", 1)], 1500.0)
+        self.assertEqual(snapshots[("s1g1", 2)], 1500.0)
+        self.assertEqual(snapshots[("s2g1", 1)], 1500.0)
+        self.assertEqual(snapshots[("s2g1", 2)], 1500.0)
+
+    def test_offseason_carryover_weights_create_different_elo_features(self):
+        logs = pd.DataFrame(
+            [
+                {"SEASON": "2021-22", "TEAM_ID": 1, "GAME_ID": "s1g1", "GAME_DATE": "2021-10-01", "WON": 1},
+                {"SEASON": "2021-22", "TEAM_ID": 2, "GAME_ID": "s1g1", "GAME_DATE": "2021-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 1, "GAME_ID": "s2g1", "GAME_DATE": "2022-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 2, "GAME_ID": "s2g1", "GAME_DATE": "2022-10-01", "WON": 1},
+            ]
+        )
+        logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+
+        snapshots_025 = compute_elo_snapshots(logs, carryover_weight=0.25)
+        snapshots_05 = compute_elo_snapshots(logs, carryover_weight=0.5)
+
+        diff_025 = snapshots_025[("s2g1", 1)] - snapshots_025[("s2g1", 2)]
+        diff_05 = snapshots_05[("s2g1", 1)] - snapshots_05[("s2g1", 2)]
+        self.assertNotEqual(diff_025, diff_05)
+        self.assertGreater(abs(diff_05), abs(diff_025))
+
+    def test_elo_uses_only_previous_games_from_same_season(self):
+        logs = pd.DataFrame(
+            [
+                {"SEASON": "2021-22", "TEAM_ID": 1, "GAME_ID": "old", "GAME_DATE": "2021-10-01", "WON": 1},
+                {"SEASON": "2021-22", "TEAM_ID": 2, "GAME_ID": "old", "GAME_DATE": "2021-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 1, "GAME_ID": "first", "GAME_DATE": "2022-10-01", "WON": 1},
+                {"SEASON": "2022-23", "TEAM_ID": 2, "GAME_ID": "first", "GAME_DATE": "2022-10-01", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 1, "GAME_ID": "second", "GAME_DATE": "2022-10-03", "WON": 0},
+                {"SEASON": "2022-23", "TEAM_ID": 2, "GAME_ID": "second", "GAME_DATE": "2022-10-03", "WON": 1},
+            ]
+        )
+        logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+
+        snapshots = compute_elo_snapshots(logs, carryover_weight=0.0)
+
+        self.assertEqual(snapshots[("first", 1)], 1500.0)
+        self.assertEqual(snapshots[("first", 2)], 1500.0)
+        self.assertNotEqual(snapshots[("second", 1)], 1500.0)
+        self.assertNotEqual(snapshots[("second", 2)], 1500.0)
+
+    def test_okc_prior_seasons_do_not_affect_reset_elo(self):
+        okc_id = 1610612760
+        logs = pd.DataFrame(
+            [
+                {"SEASON": "2015-16", "TEAM_ID": okc_id, "GAME_ID": "old", "GAME_DATE": "2015-10-01", "WON": 1},
+                {"SEASON": "2015-16", "TEAM_ID": 2, "GAME_ID": "old", "GAME_DATE": "2015-10-01", "WON": 0},
+                {"SEASON": "2024-25", "TEAM_ID": okc_id, "GAME_ID": "new", "GAME_DATE": "2024-10-01", "WON": 0},
+                {"SEASON": "2024-25", "TEAM_ID": 3, "GAME_ID": "new", "GAME_DATE": "2024-10-01", "WON": 1},
+            ]
+        )
+        logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+
+        snapshots = compute_elo_snapshots(logs, carryover_weight=0.0)
+
+        self.assertEqual(snapshots[("new", okc_id)], 1500.0)
+
+    def test_rest_days_and_back_to_back_flags_are_correct(self):
+        team_a_games = pd.DataFrame([{"GAME_DATE": "2024-04-09"}])
+        team_b_games = pd.DataFrame([{"GAME_DATE": "2024-04-07"}])
+        team_a_games["GAME_DATE"] = pd.to_datetime(team_a_games["GAME_DATE"])
+        team_b_games["GAME_DATE"] = pd.to_datetime(team_b_games["GAME_DATE"])
+
+        features = _rest_features(team_a_games, team_b_games, pd.Timestamp("2024-04-10"))
+
+        self.assertEqual(features["rest_days_A"], 1.0)
+        self.assertEqual(features["rest_days_B"], 3.0)
+        self.assertEqual(features["rest_diff"], -2.0)
+        self.assertEqual(features["is_back_to_back_A"], 1.0)
+        self.assertEqual(features["is_back_to_back_B"], 0.0)
+
+    def test_rolling_features_exclude_current_game(self):
+        logs = pd.DataFrame(
+            [
+                {"TEAM_ID": 1, "GAME_ID": "a_prior", "GAME_DATE": "2024-04-01", "WON": 0, "NET_RATING_GAME": -5, "POINT_DIFF": -4, "DEF_RATING_GAME": 105, "PTS": 90, "FGA": 80, "FTA": 10},
+                {"TEAM_ID": 1, "GAME_ID": "a_current", "GAME_DATE": "2024-04-10", "WON": 1, "NET_RATING_GAME": 20, "POINT_DIFF": 20, "DEF_RATING_GAME": 90, "PTS": 120, "FGA": 80, "FTA": 20},
+                {"TEAM_ID": 2, "GAME_ID": "b_prior", "GAME_DATE": "2024-04-01", "WON": 1, "NET_RATING_GAME": 5, "POINT_DIFF": 4, "DEF_RATING_GAME": 95, "PTS": 100, "FGA": 80, "FTA": 10},
+                {"TEAM_ID": 2, "GAME_ID": "b_current", "GAME_DATE": "2024-04-10", "WON": 0, "NET_RATING_GAME": -20, "POINT_DIFF": -20, "DEF_RATING_GAME": 120, "PTS": 80, "FGA": 80, "FTA": 20},
+            ]
+        )
+        logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"])
+        team_a_games = _games_before_date(logs, 1, pd.Timestamp("2024-04-10"))
+        team_b_games = _games_before_date(logs, 2, pd.Timestamp("2024-04-10"))
+
+        recent = _recent_form_features(team_a_games, team_b_games)
+        weighted = _weighted_recent_features(team_a_games, team_b_games)
+
+        self.assertEqual(recent["last_3_win_pct_diff"], -1.0)
+        self.assertEqual(recent["last_5_net_rating_diff"], -10.0)
+        self.assertEqual(weighted["weighted_recent_point_diff"], -8.0)
 
     def test_playoff_context_uses_prior_series_games_only(self):
         playoff_games = pd.DataFrame(
