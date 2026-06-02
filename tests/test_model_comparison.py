@@ -242,9 +242,11 @@ class ModelComparisonTests(unittest.TestCase):
                     "evaluate_calibrated_feature_audit",
                     return_value=pd.DataFrame(),
                 ), \
+                mock.patch.object(predictor_module, "train_model", create=True) as old_train_mock, \
                 mock.patch.object(predictor_module, "train_production_models", return_value=artifact) as train_mock:
                 predictor_module.command_train(args)
 
+        old_train_mock.assert_not_called()
         train_kwargs = train_mock.call_args.kwargs
         self.assertEqual(train_kwargs["home_feature_set_name"], PRODUCTION_HOME_FEATURE_SET_NAME)
         self.assertEqual(
@@ -280,12 +282,28 @@ class ModelComparisonTests(unittest.TestCase):
 
             saved = load_model(model_path)
             calibration = pd.read_csv(calibration_path)
+            self.assertIn("metadata", saved)
+            self.assertIn("production_models", saved)
+            self.assertIn(PREDICTION_MODE_CURRENT, saved["production_models"])
+            self.assertIn(PREDICTION_MODE_PLAYOFF, saved["production_models"])
             self.assertEqual(saved["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
+            self.assertIn("clipped_home_win_pct_diff", saved["feature_columns"])
+            self.assertIn("clipped_away_win_pct_diff", saved["feature_columns"])
+            for excluded_feature in [
+                "home_advantage_diff",
+                "game_number",
+                "elimination_game",
+                "series_score_diff",
+            ]:
+                self.assertNotIn(excluded_feature, saved["feature_columns"])
             self.assertEqual(saved["metadata"]["selected_home_feature_design"], PRODUCTION_HOME_FEATURE_SET_NAME)
             for feature_columns in [saved["current_hypothetical_features"], saved["playoff_context_features"]]:
                 self.assertIn("clipped_home_win_pct_diff", feature_columns)
                 self.assertIn("clipped_away_win_pct_diff", feature_columns)
                 self.assertNotIn("home_advantage_diff", feature_columns)
+                self.assertNotIn("game_number", feature_columns)
+                self.assertNotIn("elimination_game", feature_columns)
+                self.assertNotIn("series_score_diff", feature_columns)
             self.assertIn("current_hypothetical_model", saved)
             self.assertIn("playoff_context_model", saved)
             self.assertIn("current_hypothetical_features", saved)

@@ -21,7 +21,6 @@ from .model import (
     PRODUCTION_FEATURE_SET_NAME,
     PRODUCTION_HOME_FEATURE_SET_NAME,
     select_features_with_extra_trees,
-    train_model,
     train_production_models,
 )
 from .nba_data import (
@@ -239,20 +238,9 @@ def command_train(args: argparse.Namespace) -> None:
         print(f"Saved home feature ablation to {home_ablation_path}")
         print(f"Saved calibrated feature audit to {calibrated_feature_audit_path}")
         print(f"Saved model calibration to {calibration_path}")
-        print(f"Saved feature importances to {feature_importance_path}")
-        print(f"Saved training data to {training_csv}")
-        return
-
-    metrics = train_model(training_frame, args.model_path)
-    print(f"Training rows: {metrics['rows']}")
-    print(f"Rows with missing features: {metrics['rows_with_missing_features']}")
-    print(f"Total missing feature values: {metrics['missing_feature_values']}")
-    print(f"Accuracy: {metrics['accuracy']:.3f}")
-    if metrics["roc_auc"] is not None:
-        print(f"ROC AUC: {metrics['roc_auc']:.3f}")
-    print(metrics["classification_report"])
-    print(f"Saved model to {args.model_path}")
+    print(f"Saved feature importances to {feature_importance_path}")
     print(f"Saved training data to {training_csv}")
+    return
 
 
 def command_predict(args: argparse.Namespace) -> None:
