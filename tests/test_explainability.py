@@ -15,7 +15,7 @@ from app import (
     local_factor_table,
     save_prediction_explanation,
 )
-from src.model import extract_feature_importances
+from src.model import PREDICTION_MODE_CURRENT, extract_feature_importances, get_model_entry_for_mode, load_model
 
 
 class ExplainabilityDirectionTests(unittest.TestCase):
@@ -389,6 +389,74 @@ class NoninformativeFactorFilterTests(unittest.TestCase):
             top_factors = json.loads(saved.loc[0, "top_factors"])
 
         self.assertEqual([row["feature"] for row in top_factors], ["keep_me"])
+
+
+class ExplanationArtifactRegressionTests(unittest.TestCase):
+    def test_current_artifact_explanation_has_global_importances(self):
+        model_path = Path("models/playoff_predictor.joblib")
+        if not model_path.exists():
+            self.skipTest("Current saved model artifact is not available")
+
+        model_bundle = load_model(model_path)
+        model_entry = get_model_entry_for_mode(model_bundle, PREDICTION_MODE_CURRENT)
+
+        importances = app.load_feature_importances(
+            model_entry,
+            model_entry["feature_columns"],
+            PREDICTION_MODE_CURRENT,
+        )
+
+        self.assertGreaterEqual(int(importances["importance"].notna().sum()), 2)
+
+    def test_local_effect_values_change_by_feature_for_realistic_model(self):
+        class WeightedPipeline:
+            def predict_proba(self, frame):
+                score = (
+                    frame["OFF_RATING_DIFF"].to_numpy(dtype=float) * 0.35
+                    + frame["DEF_RATING_DIFF"].to_numpy(dtype=float) * -0.15
+                    + frame["PACE_DIFF"].to_numpy(dtype=float) * 0.05
+                )
+                probabilities = 1.0 / (1.0 + np.exp(-score))
+                return np.column_stack([1.0 - probabilities, probabilities])
+
+        feature_columns = ["OFF_RATING_DIFF", "DEF_RATING_DIFF", "PACE_DIFF"]
+        features = {"OFF_RATING_DIFF": 4.0, "DEF_RATING_DIFF": 3.0, "PACE_DIFF": 2.0}
+        pipeline = WeightedPipeline()
+        full_probability = float(
+            pipeline.predict_proba(pd.DataFrame([features], columns=feature_columns))[0, 1]
+        )
+        importances = pd.DataFrame(
+            [{"feature": feature, "importance": 0.0} for feature in feature_columns]
+        )
+
+        factors = local_factor_table(
+            features,
+            importances,
+            feature_columns,
+            pipeline=pipeline,
+            full_probability=full_probability,
+        )
+
+        local_effects = factors.set_index("feature").loc[feature_columns, "local_effect"]
+        self.assertGreater(local_effects.nunique(), 1)
+
+    def test_display_global_importance_does_not_show_literal_none(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "OFF_RATING_DIFF",
+                    "value": 1.0,
+                    "global_importance": None,
+                    "local_effect": 0.12,
+                    "pushes_toward": "Team A",
+                }
+            ]
+        )
+
+        displayed = display_factor_table(factors, "NYK", "CLE")
+
+        self.assertNotIn("None", displayed["global_importance"].astype(str).tolist())
+        self.assertEqual(displayed.loc[0, "global_importance"], "unavailable")
 
 
 if __name__ == "__main__":

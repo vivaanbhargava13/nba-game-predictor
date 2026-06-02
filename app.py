@@ -216,16 +216,17 @@ def load_feature_importances(
     feature_columns: list[str],
     prediction_context_mode: str | None = None,
 ) -> pd.DataFrame:
+    model_name = str(model_bundle.get("metrics", {}).get("model", "Current Model"))
     if FEATURE_IMPORTANCE_PATH.exists():
         importances = pd.read_csv(FEATURE_IMPORTANCE_PATH)
         if {"feature", "importance"}.issubset(importances.columns):
             if prediction_context_mode and "prediction_context_mode" in importances.columns:
                 importances = importances[importances["prediction_context_mode"].eq(prediction_context_mode)]
             importances = importances[importances["feature"].isin(feature_columns)].copy()
-            if not importances.empty:
+            importances["importance"] = pd.to_numeric(importances["importance"], errors="coerce")
+            if not importances.empty and importances["importance"].notna().any():
                 return importances.sort_values("importance", ascending=False).reset_index(drop=True)
 
-    model_name = str(model_bundle.get("metrics", {}).get("model", "Current Model"))
     return extract_feature_importances(model_bundle["pipeline"], model_name, feature_columns)
 
 
@@ -322,12 +323,14 @@ def _feature_probability_contributions(
 ) -> dict[str, float]:
     contributions: dict[str, float] = {}
     base_row = {column: features.get(column) for column in feature_columns}
+    base_frame = pd.DataFrame([base_row], columns=feature_columns)
+    base_probability = float(pipeline.predict_proba(base_frame)[0, 1])
     for feature in feature_columns:
         neutralized = dict(base_row)
         neutralized[feature] = _neutral_feature_value(feature)
         neutral_frame = pd.DataFrame([neutralized], columns=feature_columns)
         neutral_probability = float(pipeline.predict_proba(neutral_frame)[0, 1])
-        contributions[feature] = full_probability - neutral_probability
+        contributions[feature] = base_probability - neutral_probability
     return contributions
 
 
@@ -540,6 +543,10 @@ def display_factor_table(
     direction_labels = {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
     if "pushes_toward" in view.columns:
         view["pushes_toward"] = view["pushes_toward"].replace(direction_labels)
+    if "global_importance" in view.columns:
+        view["global_importance"] = view["global_importance"].where(
+            pd.notna(view["global_importance"]), "unavailable"
+        )
     return view.rename(
         columns={
             "feature": "feature",
