@@ -143,6 +143,34 @@ def _predict_probability(
     return probability, features, stats_by_team.loc[team_a_id], stats_by_team.loc[team_b_id], home_team_id
 
 
+def _season_sort_key(season: str) -> int:
+    return int(str(season)[:4])
+
+
+def _resolve_comparison_seasons(
+    training_frame: pd.DataFrame,
+    requested_train_seasons: list[str],
+    requested_test_seasons: list[str],
+) -> tuple[list[str], list[str]]:
+    available_seasons = sorted(
+        training_frame["SEASON"].astype(str).dropna().unique().tolist(),
+        key=_season_sort_key,
+    )
+    available_set = set(available_seasons)
+    requested_seasons = requested_train_seasons + requested_test_seasons
+    if requested_seasons and set(requested_seasons).issubset(available_set):
+        return requested_train_seasons, requested_test_seasons
+
+    if len(available_seasons) < 2:
+        raise ValueError("At least two seasons are required for a train/test comparison split.")
+
+    requested_test_count = max(1, len(requested_test_seasons))
+    test_count = min(requested_test_count, len(available_seasons) - 1)
+    test_seasons = available_seasons[-test_count:]
+    train_seasons = available_seasons[:-test_count]
+    return train_seasons, test_seasons
+
+
 def command_train(args: argparse.Namespace) -> None:
     seasons = season_range(args.start_season, args.end_season)
     training_frame = load_training_frame(
@@ -165,6 +193,12 @@ def command_train(args: argparse.Namespace) -> None:
 
     train_seasons = season_range(args.comparison_train_start, args.comparison_train_end)
     test_seasons = season_range(args.comparison_test_start, args.comparison_test_end)
+    train_seasons, test_seasons = _resolve_comparison_seasons(training_frame, train_seasons, test_seasons)
+    print(f"Using train seasons: {', '.join(train_seasons)}")
+    print(f"Using test seasons: {', '.join(test_seasons)}")
+
+    if not set(train_seasons + test_seasons).issubset(set(training_frame["SEASON"].astype(str).unique())):
+        raise ValueError("Resolved train/test seasons are not present in the training frame.")
 
     if set(train_seasons + test_seasons).issubset(set(training_frame["SEASON"].astype(str).unique())):
         feature_selection, selected_features = select_features_with_extra_trees(

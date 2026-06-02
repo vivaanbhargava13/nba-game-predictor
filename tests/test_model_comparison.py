@@ -254,6 +254,58 @@ class ModelComparisonTests(unittest.TestCase):
             ["home_team_A", "clipped_home_win_pct_diff", "clipped_away_win_pct_diff"],
         )
 
+    def test_train_command_creates_model_when_default_comparison_seasons_missing(self):
+        rows = []
+        seasons = ["2020-21", "2021-22", "2022-23", "2023-24"]
+        for season_index, season in enumerate(seasons):
+            for game_index in range(10):
+                target = int((game_index + season_index) % 2 == 0)
+                row = {"SEASON": season, "TEAM_A_WON": target}
+                for feature in FEATURE_COLUMNS:
+                    row[feature] = float(target)
+                rows.append(row)
+
+        training_frame = pd.DataFrame(rows)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.joblib"
+            args = SimpleNamespace(
+                start_season="2020-21",
+                end_season="2023-24",
+                cache_dir=Path(tmpdir) / "raw",
+                feature_season_type="Regular Season",
+                processed_dir=Path(tmpdir) / "processed",
+                force_refresh=False,
+                comparison_train_start="2015-16",
+                comparison_train_end="2022-23",
+                comparison_test_start="2023-24",
+                comparison_test_end="2024-25",
+                model_path=model_path,
+            )
+
+            with mock.patch.object(predictor_module, "load_training_frame", return_value=training_frame), \
+                mock.patch.object(
+                    predictor_module,
+                    "select_features_with_extra_trees",
+                    return_value=(pd.DataFrame({"features": [",".join(PRODUCTION_FEATURE_COLUMNS)]}), PRODUCTION_FEATURE_COLUMNS),
+                ), \
+                mock.patch.object(predictor_module, "compare_models_by_season", return_value=pd.DataFrame({"model": ["mock"]})), \
+                mock.patch.object(
+                    predictor_module,
+                    "evaluate_feature_group_ablation",
+                    return_value=pd.DataFrame({"feature_set": [PRODUCTION_FEATURE_SET_NAME]}),
+                ), \
+                mock.patch.object(predictor_module, "evaluate_home_feature_ablation", return_value=pd.DataFrame()), \
+                mock.patch.object(predictor_module, "evaluate_calibrated_feature_audit", return_value=pd.DataFrame()):
+                predictor_module.command_train(args)
+
+            self.assertTrue(model_path.exists())
+            artifact = load_model(model_path)
+            self.assertIn("metadata", artifact)
+            self.assertIn("production_models", artifact)
+            self.assertEqual(artifact["metadata"]["train_seasons"], ["2020-21", "2021-22"])
+            self.assertEqual(artifact["metadata"]["test_seasons"], ["2022-23", "2023-24"])
+
     def test_train_production_models_saves_two_prediction_modes(self):
         rows = []
         seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
