@@ -38,6 +38,8 @@ DEFAULT_SEASON = "2024-25"
 DEFAULT_SEASON_TYPE = "Regular Season"
 PROCESSED_DIR = Path("data/processed")
 FEATURE_IMPORTANCE_PATH = PROCESSED_DIR / "feature_importances.csv"
+MODEL_COMPARISON_PATH = PROCESSED_DIR / "model_comparison.csv"
+MODEL_CALIBRATION_PATH = PROCESSED_DIR / "model_calibration.csv"
 PREDICTION_EXPLANATIONS_PATH = PROCESSED_DIR / "prediction_explanations.csv"
 PREDICTION_CHATS_PATH = PROCESSED_DIR / "prediction_chats.csv"
 CHAT_PROVIDER_GEMINI = "Gemini"
@@ -979,6 +981,7 @@ def inject_dashboard_css() -> None:
                 line-height: 1.3;
             }}
             .model-details-button {{
+                appearance: none;
                 display: inline-flex;
                 align-items: center;
                 flex: 0 0 auto;
@@ -987,6 +990,8 @@ def inject_dashboard_css() -> None:
                 padding: 0.25rem 0.58rem;
                 background: rgba(255, 255, 255, 0.72);
                 color: #475467;
+                cursor: pointer;
+                font-family: inherit;
                 font-size: 0.68rem;
                 font-weight: 800;
                 line-height: 1;
@@ -997,6 +1002,224 @@ def inject_dashboard_css() -> None:
                 border-color: rgba(249, 115, 22, 0.34);
                 color: var(--ink);
                 box-shadow: 0 4px 12px rgba(23, 32, 51, 0.08);
+            }}
+            .model-details-popover {{
+                width: min(840px, calc(100vw - 2rem));
+                max-height: min(82vh, 760px);
+                overflow: auto;
+                border: 1px solid rgba(148, 163, 184, 0.22);
+                border-radius: 16px;
+                padding: 1.05rem;
+                background:
+                    radial-gradient(circle at top left, rgba(249, 115, 22, 0.18), transparent 30%),
+                    linear-gradient(145deg, #0B1220 0%, #111827 56%, #172033 100%);
+                color: #F8FAFC;
+                box-shadow: 0 26px 64px rgba(2, 6, 23, 0.42);
+                font-size: 0.84rem;
+                line-height: 1.45;
+            }}
+            .model-details-title {{
+                margin: 0 0 0.9rem;
+                color: #F8FAFC;
+                font-size: 1.15rem;
+                line-height: 1.2;
+                font-weight: 900;
+            }}
+            .model-details-grid {{
+                display: grid;
+                grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+                gap: 0.8rem;
+                align-items: start;
+            }}
+            .model-details-stack {{
+                display: grid;
+                gap: 0.8rem;
+            }}
+            .model-details-section {{
+                border: 1px solid rgba(148, 163, 184, 0.18);
+                border-radius: 12px;
+                padding: 0.82rem;
+                background: rgba(15, 23, 42, 0.76);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+            }}
+            .model-details-section-primary {{
+                padding: 0;
+                background: transparent;
+                border: 0;
+                box-shadow: none;
+            }}
+            .model-details-section-title {{
+                color: #CBD5E1;
+                font-size: 0.7rem;
+                font-weight: 900;
+                letter-spacing: 0.04em;
+                line-height: 1;
+                margin-bottom: 0.62rem;
+                text-transform: uppercase;
+            }}
+            .model-facts-grid {{
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.58rem;
+            }}
+            .model-fact-row {{
+                display: grid;
+                gap: 0.22rem;
+                min-width: 0;
+                padding: 0.58rem;
+                border: 1px solid rgba(148, 163, 184, 0.16);
+                border-radius: 10px;
+                background: rgba(30, 41, 59, 0.48);
+            }}
+            .model-detail-label {{
+                color: #94A3B8;
+                font-weight: 800;
+            }}
+            .model-detail-value {{
+                color: #F8FAFC;
+                font-weight: 800;
+                overflow-wrap: normal;
+                white-space: nowrap;
+            }}
+            .model-fact-row .model-detail-value {{
+                white-space: normal;
+            }}
+            .model-metrics-dashboard {{
+                display: grid;
+                grid-template-columns: minmax(13rem, 0.92fr) minmax(0, 1.08fr);
+                gap: 0.8rem;
+                align-items: stretch;
+            }}
+            .model-hero-metric {{
+                display: grid;
+                align-content: center;
+                min-height: 9rem;
+                padding: 1rem;
+                border: 1px solid rgba(249, 115, 22, 0.32);
+                border-radius: 14px;
+                background:
+                    linear-gradient(145deg, rgba(249, 115, 22, 0.24), rgba(59, 130, 246, 0.08)),
+                    rgba(15, 23, 42, 0.86);
+            }}
+            .model-hero-label {{
+                color: #FDBA74;
+                font-size: 0.72rem;
+                font-weight: 900;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+            }}
+            .model-hero-value {{
+                color: #FFFFFF;
+                font-size: 3rem;
+                font-weight: 950;
+                line-height: 1;
+                margin: 0.3rem 0 0.22rem;
+                white-space: nowrap;
+                font-variant-numeric: tabular-nums;
+            }}
+            .model-hero-subtitle {{
+                color: #CBD5E1;
+                font-size: 0.78rem;
+                font-weight: 750;
+            }}
+            .model-metrics-grid {{
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.55rem;
+            }}
+            .model-metric-card {{
+                display: grid;
+                gap: 0.2rem;
+                min-width: 0;
+                padding: 0.68rem;
+                border: 1px solid rgba(148, 163, 184, 0.16);
+                border-radius: 10px;
+                background: rgba(30, 41, 59, 0.56);
+            }}
+            .model-feature-list {{
+                display: grid;
+                gap: 0.52rem;
+            }}
+            .model-feature-row {{
+                display: grid;
+                grid-template-columns: minmax(7.5rem, 1fr) 4.2rem;
+                gap: 0.7rem;
+                align-items: center;
+            }}
+            .model-feature-label {{
+                color: #F8FAFC;
+                font-weight: 800;
+                overflow-wrap: anywhere;
+            }}
+            .model-feature-value {{
+                color: #CBD5E1;
+                font-variant-numeric: tabular-nums;
+                text-align: right;
+                white-space: nowrap;
+            }}
+            .model-feature-track {{
+                grid-column: 1 / -1;
+                height: 0.38rem;
+                border-radius: 999px;
+                background: rgba(148, 163, 184, 0.18);
+                overflow: hidden;
+            }}
+            .model-feature-bar {{
+                height: 100%;
+                border-radius: inherit;
+                background: linear-gradient(90deg, #F97316, #3B82F6);
+            }}
+            .model-calibration-table {{
+                display: grid;
+                gap: 0.34rem;
+            }}
+            .model-calibration-row {{
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 0.5rem;
+                align-items: center;
+                color: #E2E8F0;
+                font-size: 0.78rem;
+            }}
+            .model-calibration-row[data-head="true"] {{
+                color: #94A3B8;
+                font-size: 0.68rem;
+                font-weight: 900;
+                text-transform: uppercase;
+            }}
+            .model-calibration-row span {{
+                white-space: nowrap;
+                font-variant-numeric: tabular-nums;
+            }}
+            .model-detail-note {{
+                color: #94A3B8;
+                font-size: 0.78rem;
+                line-height: 1.4;
+                margin: 0;
+            }}
+            .model-calibration-copy {{
+                color: #CBD5E1;
+                font-size: 0.78rem;
+                line-height: 1.45;
+                margin: 0 0 0.42rem;
+            }}
+            @media (max-width: 720px) {{
+                .model-details-grid,
+                .model-metrics-dashboard,
+                .model-facts-grid,
+                .model-metrics-grid {{
+                    grid-template-columns: 1fr;
+                }}
+                .model-feature-row,
+                .model-calibration-row {{
+                    grid-template-columns: minmax(0, 1fr) auto auto;
+                }}
+                .model-hero-metric {{
+                    min-height: 7rem;
+                }}
+                .model-hero-value {{
+                    font-size: 2.45rem;
+                }}
             }}
             @media (max-width: 720px) {{
                 .dashboard-header {{
@@ -1503,9 +1726,271 @@ def inject_team_css(team_a_abbreviation: str, team_b_abbreviation: str) -> tuple
     return team_a_colors, team_b_colors
 
 
+MODEL_DETAIL_FACTS = [
+    ("Model", "Calibrated RF"),
+    ("Method", "Order-symmetric probabilities"),
+    ("Purpose", "Pure basketball-stat matchup/series forecast"),
+    ("Excludes", "odds, injuries, lineup/news"),
+]
+
+MODEL_DETAIL_METRICS = [
+    ("Accuracy", "accuracy"),
+    ("ROC AUC", "roc_auc"),
+    ("Brier Score", "brier_score"),
+    ("Log Loss", "log_loss"),
+    ("Precision", "precision"),
+    ("Recall", "recall"),
+    ("F1", "f1"),
+    ("ECE", "expected_calibration_error"),
+]
+
+
+def _read_processed_csv(path: Path) -> pd.DataFrame:
+    try:
+        if path.exists():
+            return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def _format_model_detail_number(value) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _select_model_detail_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    selected = frame.copy()
+    if "model" in selected.columns:
+        model_rows = selected[selected["model"].astype(str).str.contains("Random Forest", case=False, na=False)]
+        if not model_rows.empty:
+            selected = model_rows
+    if "prediction_context_mode" in selected.columns:
+        mode_rows = selected[selected["prediction_context_mode"].eq(PREDICTION_MODE_CURRENT)]
+        if not mode_rows.empty:
+            selected = mode_rows
+    if "calibration_method" in selected.columns:
+        calibrated_rows = selected[~selected["calibration_method"].astype(str).str.lower().eq("raw")]
+        if not calibrated_rows.empty:
+            selected = calibrated_rows
+    if "feature_set" in selected.columns:
+        feature_rows = selected[selected["feature_set"].astype(str).str.contains("corrected_signs", na=False)]
+        if not feature_rows.empty:
+            selected = feature_rows
+    return selected
+
+
+def _best_model_detail_row(frame: pd.DataFrame) -> pd.Series | None:
+    selected = _select_model_detail_rows(frame)
+    if selected.empty:
+        return None
+
+    sort_columns = [column for column in ["roc_auc", "brier_score", "log_loss"] if column in selected.columns]
+    if sort_columns:
+        selected = selected.assign(
+            roc_auc=pd.to_numeric(selected.get("roc_auc"), errors="coerce"),
+            brier_score=pd.to_numeric(selected.get("brier_score"), errors="coerce"),
+            log_loss=pd.to_numeric(selected.get("log_loss"), errors="coerce"),
+        )
+        selected = selected.sort_values(
+            sort_columns,
+            ascending=[False if column == "roc_auc" else True for column in sort_columns],
+            na_position="last",
+        )
+    return selected.iloc[0]
+
+
+def _render_model_facts_html() -> str:
+    rows = []
+    for label, value in MODEL_DETAIL_FACTS:
+        rows.append(
+            '<div class="model-fact-row">'
+            f'<span class="model-detail-label">{html.escape(label)}</span>'
+            f'<span class="model-detail-value">{html.escape(value)}</span>'
+            "</div>"
+        )
+    return "".join(rows)
+
+
+def _render_model_metrics_html() -> str:
+    calibration = _read_processed_csv(MODEL_CALIBRATION_PATH)
+    row = _best_model_detail_row(calibration)
+    if row is None:
+        comparison = _read_processed_csv(MODEL_COMPARISON_PATH)
+        row = _best_model_detail_row(comparison)
+    if row is None:
+        return '<p class="model-detail-note">Validation metrics are unavailable right now.</p>'
+
+    hero_value = _format_model_detail_number(row.get("roc_auc"))
+    if not hero_value:
+        hero_label, hero_column = MODEL_DETAIL_METRICS[0]
+        hero_value = _format_model_detail_number(row.get(hero_column)) or "Unavailable"
+    else:
+        hero_label = "ROC AUC"
+
+    supporting_rows = []
+    for label, column in MODEL_DETAIL_METRICS:
+        if label == hero_label:
+            continue
+        value = _format_model_detail_number(row.get(column))
+        if not value:
+            value = "Unavailable"
+        supporting_rows.append(
+            '<div class="model-metric-card">'
+            f'<span class="model-detail-label">{html.escape(label)}</span>'
+            f'<span class="model-detail-value">{html.escape(value)}</span>'
+            "</div>"
+        )
+    return (
+        '<div class="model-metrics-dashboard">'
+        '<div class="model-hero-metric">'
+        f'<span class="model-hero-label">{html.escape(hero_label)}</span>'
+        f'<span class="model-hero-value">{html.escape(hero_value)}</span>'
+        '<span class="model-hero-subtitle">Validation performance</span>'
+        "</div>"
+        f'<div class="model-metrics-grid">{"".join(supporting_rows)}</div>'
+        "</div>"
+    )
+
+
+def _load_model_detail_importances() -> pd.DataFrame:
+    def artifact_importances() -> pd.DataFrame:
+        try:
+            model_bundle = load_model(DEFAULT_MODEL_PATH)
+            feature_columns = all_saved_feature_columns(model_bundle)
+            return load_feature_importances(model_bundle, feature_columns, PREDICTION_MODE_CURRENT)
+        except Exception:
+            return pd.DataFrame()
+
+    importances = pd.DataFrame()
+    if FEATURE_IMPORTANCE_PATH.exists():
+        importances = _read_processed_csv(FEATURE_IMPORTANCE_PATH)
+        if not {"feature", "importance"}.issubset(importances.columns):
+            importances = pd.DataFrame()
+    if importances.empty:
+        importances = artifact_importances()
+    if importances.empty:
+        return pd.DataFrame()
+
+    if "prediction_context_mode" in importances.columns:
+        mode_rows = importances[importances["prediction_context_mode"].eq(PREDICTION_MODE_CURRENT)]
+        if not mode_rows.empty:
+            importances = mode_rows
+    if "model" in importances.columns:
+        model_rows = importances[importances["model"].astype(str).str.contains("Random Forest", case=False, na=False)]
+        if not model_rows.empty:
+            importances = model_rows
+    importances = importances.copy()
+    importances["importance"] = pd.to_numeric(importances["importance"], errors="coerce")
+    importances = importances.dropna(subset=["importance"])
+    if importances.empty and FEATURE_IMPORTANCE_PATH.exists():
+        importances = artifact_importances()
+        if importances.empty:
+            return pd.DataFrame()
+        importances = importances.copy()
+        importances["importance"] = pd.to_numeric(importances["importance"], errors="coerce")
+        importances = importances.dropna(subset=["importance"])
+    return importances.sort_values("importance", ascending=False).head(6).reset_index(drop=True)
+
+
+def _render_feature_importance_html() -> str:
+    importances = _load_model_detail_importances()
+    if importances.empty:
+        return '<p class="model-detail-note">Feature importance data is unavailable for this model.</p>'
+
+    max_importance = max(float(importances["importance"].max()), 0.000001)
+    rows = []
+    for _, row in importances.iterrows():
+        feature = html.escape(basketball_feature_label(str(row["feature"])).capitalize())
+        importance = float(row["importance"])
+        width = max(0.0, min(100.0, (importance / max_importance) * 100))
+        rows.append(
+            '<div class="model-feature-row">'
+            f'<span class="model-feature-label">{feature}</span>'
+            f'<span class="model-feature-value">{importance:.3f}</span>'
+            '<span class="model-feature-track">'
+            f'<span class="model-feature-bar" style="width: {width:.1f}%"></span>'
+            "</span>"
+            "</div>"
+        )
+    return f'<div class="model-feature-list">{"".join(rows)}</div>'
+
+
+def _render_calibration_html() -> str:
+    calibration = _read_processed_csv(MODEL_CALIBRATION_PATH)
+    selected = _select_model_detail_rows(calibration)
+    lower_column = "bin_lower" if "bin_lower" in selected.columns else "bin_low"
+    required_columns = {"bin_count", lower_column, "bin_upper", "mean_predicted_probability", "observed_win_rate"}
+    if selected.empty or not required_columns.issubset(selected.columns):
+        return '<p class="model-detail-note">Calibration bins are unavailable right now.</p>'
+
+    selected = selected.copy()
+    selected["bin_count"] = pd.to_numeric(selected["bin_count"], errors="coerce").fillna(0)
+    selected[lower_column] = pd.to_numeric(selected[lower_column], errors="coerce")
+    selected = selected[selected["bin_count"] > 0].sort_values(lower_column).head(4)
+    if selected.empty:
+        return '<p class="model-detail-note">Calibration bins are unavailable right now.</p>'
+
+    rows = [
+        '<p class="model-calibration-copy">'
+        "Predicted probabilities are compared with observed win rates across bins."
+        "</p>",
+        (
+            '<div class="model-calibration-row" data-head="true">'
+            "<span>Predicted</span><span>Observed</span><span>Count</span></div>"
+        ),
+    ]
+    for _, row in selected.iterrows():
+        predicted = _format_model_detail_number(row.get("mean_predicted_probability"))
+        observed = _format_model_detail_number(row.get("observed_win_rate"))
+        rows.append(
+            '<div class="model-calibration-row">'
+            f'<span>{html.escape(predicted)}</span>'
+            f'<span>{html.escape(observed)}</span>'
+            f'<span>{int(row["bin_count"])}</span>'
+            "</div>"
+        )
+    return f'<div class="model-calibration-table">{"".join(rows)}</div>'
+
+
+def _render_model_details_popover() -> str:
+    return f"""
+        <div id="model-details-popover" class="model-details-popover" popover>
+            <h2 class="model-details-title">About this model</h2>
+            <div class="model-details-stack">
+                <section class="model-details-section model-details-section-primary">
+                    {_render_model_metrics_html()}
+                </section>
+                <section class="model-details-section">
+                    <div class="model-details-section-title">Model facts</div>
+                    <div class="model-facts-grid">
+                        {_render_model_facts_html()}
+                    </div>
+                </section>
+                <div class="model-details-grid">
+                    <section class="model-details-section">
+                        <div class="model-details-section-title">Top feature importances</div>
+                        {_render_feature_importance_html()}
+                    </section>
+                    <section class="model-details-section">
+                        <div class="model-details-section-title">Calibration</div>
+                        {_render_calibration_html()}
+                    </section>
+                </div>
+            </div>
+        </div>
+    """
+
+
 def render_header() -> None:
-    st.markdown(
-        """
+    model_status_card_html = f"""
         <div class="dashboard-header">
             <div>
                 <h1 class="dashboard-title">Game Predictor Dashboard</h1>
@@ -1515,8 +2000,8 @@ def render_header() -> None:
             </div>
             <div class="model-status-card">
                 <div class="model-status-top">
-                    <div class="model-status-title">Model Status</div>
-                    <span class="model-details-button">Details</span>
+                    <div class="model-status-title">MODEL STATUS</div>
+                    <button type="button" class="model-details-button" popovertarget="model-details-popover">Details</button>
                 </div>
                 <div class="model-status-badges">
                     <span class="model-status-pill" data-tone="warm">Calibrated RF</span>
@@ -1524,10 +2009,10 @@ def render_header() -> None:
                 </div>
                 <div class="model-status-limitations">No odds • injuries • lineup/news</div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """
+    st.markdown(model_status_card_html, unsafe_allow_html=True)
+    st.markdown(_render_model_details_popover(), unsafe_allow_html=True)
 
 
 def _team_gradient_span(abbreviation: str) -> str:
