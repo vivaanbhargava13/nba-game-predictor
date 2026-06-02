@@ -180,6 +180,44 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(games[0]["home_series_wins"], 0)
         self.assertEqual(games[0]["game_number"], 4)
 
+    def test_parse_espn_completed_series_winner(self):
+        payload = _espn_payload(
+            "402",
+            "2026-06-21T00:00Z",
+            completed=True,
+            away_abbr="NYK",
+            away_id="18",
+            home_abbr="SAS",
+            home_id="24",
+            series_status="SAS wins series 4-3",
+        )
+
+        games = parse_espn_scoreboard_games(payload)
+
+        self.assertEqual(games[0]["series_status"], "SAS wins 4-3")
+        self.assertEqual(games[0]["away_series_wins"], 3)
+        self.assertEqual(games[0]["home_series_wins"], 4)
+        self.assertEqual(games[0]["game_number"], 7)
+
+    def test_parse_espn_finals_game_one_zero_zero_context(self):
+        payload = _espn_payload(
+            "403",
+            "2026-06-04T00:00Z",
+            completed=False,
+            away_abbr="NYK",
+            away_id="18",
+            home_abbr="SAS",
+            home_id="24",
+            series_status="Series tied 0-0",
+        )
+
+        games = parse_espn_scoreboard_games(payload)
+
+        self.assertEqual(games[0]["series_status"], "Series tied 0-0")
+        self.assertEqual(games[0]["game_number"], 1)
+        self.assertEqual(games[0]["away_series_wins"], 0)
+        self.assertEqual(games[0]["home_series_wins"], 0)
+
     def test_parse_espn_leads_series_phrase_sets_click_context(self):
         labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
         payload = _espn_payload(
@@ -335,6 +373,23 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(upcoming[0]["home_abbr"], "CLE")
         self.assertIn("May 26", upcoming[0]["time_label"])
 
+    def test_upcoming_scan_excludes_unnecessary_games(self):
+        def games_for_date(game_date):
+            if game_date != date(2026, 5, 25):
+                return []
+            necessary = _game("401", "NYK", "SAS")
+            unnecessary = _game("402", "BOS", "MIA")
+            necessary["status_id"] = 1
+            unnecessary["status_text"] = "UNNECESSARY"
+            unnecessary["status_id"] = 1
+            unnecessary["time_label"] = "UNNECESSARY"
+            return [unnecessary, necessary]
+
+        with patch("src.live_games._games_for_date", side_effect=games_for_date):
+            _latest, upcoming = _scan_scoreboards(date(2026, 5, 25))
+
+        self.assertEqual([game["game_id"] for game in upcoming], ["401"])
+
     def test_today_game_still_shows_date_time(self):
         games = parse_espn_scoreboard_games(
             _espn_payload(
@@ -385,6 +440,34 @@ class LiveGamesTests(unittest.TestCase):
         self.assertIn("NYK leads 3-0", lines)
         self.assertIn("IF NECESSARY", lines)
 
+    def test_live_game_context_lines_show_completed_series_winner(self):
+        game = _game("402", "NYK", "SAS")
+        game.update(
+            {
+                "series_status": "SAS leads 4-3",
+                "away_series_wins": 3,
+                "home_series_wins": 4,
+            }
+        )
+
+        self.assertIn("SAS wins 4-3", live_game_context_lines(game))
+        self.assertNotIn("SAS leads 4-3", live_game_context_lines(game))
+
+    def test_live_game_context_lines_keep_unfinished_leads_and_ties(self):
+        leading_game = _game("403", "NYK", "SAS")
+        leading_game["series_status"] = "SAS leads 3-2"
+        tied_game = _game("404", "NYK", "SAS")
+        tied_game["series_status"] = "Series tied 3-3"
+
+        self.assertIn("SAS leads 3-2", live_game_context_lines(leading_game))
+        self.assertIn("Series tied 3-3", live_game_context_lines(tied_game))
+
+    def test_upcoming_finals_card_context_lines_include_zero_zero_tie(self):
+        game = _game("405", "NYK", "SAS")
+        game["series_status"] = "Series tied 0-0"
+
+        self.assertIn("Series tied 0-0", live_game_context_lines(game))
+
     def test_live_game_selection_state_loads_away_home_and_series(self):
         labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
         game = _game("401", "NYK", "CLE")
@@ -407,6 +490,57 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(state["prediction_context_mode"], PREDICTION_MODE_PLAYOFF)
         self.assertEqual(state["game_number"], 4)
         self.assertEqual(state["team_a_series_wins"], 3)
+        self.assertEqual(state["team_b_series_wins"], 0)
+
+    def test_finals_game_one_click_loads_playoff_context_with_zero_zero_score(self):
+        labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
+        game = _game("405", "NYK", "SAS")
+        game.update(
+            {
+                "series_label": "NBA Finals",
+                "game_number": 1,
+                "away_series_wins": 0,
+                "home_series_wins": 0,
+            }
+        )
+
+        state = live_game_selection_state(live_game_payload(game), labels)
+
+        self.assertEqual(state["prediction_context_mode"], PREDICTION_MODE_PLAYOFF)
+        self.assertEqual(state["game_number"], 1)
+        self.assertEqual(state["team_a_series_wins"], 0)
+        self.assertEqual(state["team_b_series_wins"], 0)
+
+    def test_espn_finals_scheduled_game_one_derives_zero_zero_series_context(self):
+        labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
+        game = parse_espn_scoreboard_games(
+            _espn_payload(
+                "405",
+                "2026-06-04T00:30Z",
+                completed=False,
+                away_abbr="NY",
+                away_id="18",
+                away_name="New York Knicks",
+                home_abbr="SA",
+                home_id="24",
+                home_name="San Antonio Spurs",
+                series_label="NBA Finals",
+                game_number=1,
+            )
+        )[0]
+
+        payload = live_game_payload(game)
+        payloads = live_game_render_payloads({"latest": [], "upcoming": [game]}, "upcoming")
+        output = build_live_games_topbar_html({"latest": [], "upcoming": [game]}, model_available=False)
+        state = live_game_selection_state(payload, labels)
+
+        self.assertEqual(payload["series_status"], "Series tied 0-0")
+        self.assertEqual(payloads[0]["series_status"], "Series tied 0-0")
+        self.assertIn("Series tied 0-0", output)
+        self.assertEqual(state["prediction_context_mode"], PREDICTION_MODE_PLAYOFF)
+        self.assertEqual(state["game_number"], 1)
+        self.assertEqual(state["team_a_series_wins"], 0)
+        self.assertEqual(state["team_b_series_wins"], 0)
 
     def test_nyk_alias_upcoming_click_state_uses_canonical_team(self):
         labels = ["Cleveland Cavaliers (CLE)", "New York Knicks (NYK)"]
@@ -534,6 +668,22 @@ class LiveGamesTests(unittest.TestCase):
 
         self.assertEqual(len(live_game_render_payloads(live_games, "latest")), 3)
         self.assertEqual(len(live_game_render_payloads(live_games, "upcoming")), 3)
+
+    def test_finals_card_payload_preserves_zero_zero_series_status(self):
+        game = _game("finals-g1", "NYK", "SAS")
+        game.update(
+            {
+                "series_status": "Series tied 0-0",
+                "game_number": 1,
+                "away_series_wins": 0,
+                "home_series_wins": 0,
+            }
+        )
+
+        payloads = live_game_render_payloads({"latest": [], "upcoming": [game]}, "upcoming")
+
+        self.assertEqual(payloads[0]["series_status"], "Series tied 0-0")
+        self.assertIn("Series tied 0-0", live_game_context_lines(payloads[0]))
 
     def test_latest_render_payloads_are_oldest_to_newest_left_to_right(self):
         live_games = {
@@ -752,12 +902,22 @@ def _espn_payload(
     away_score: str = "",
     home_score: str = "",
     series_status: str = "",
+    series_label: str = "",
+    game_number: Optional[int] = None,
+    round_name: str = "",
     note: str = "",
     away_name: str = "",
     home_name: str = "",
 ) -> dict:
     away_team = {"id": away_id, "abbreviation": away_abbr}
     home_team = {"id": home_id, "abbreviation": home_abbr}
+    series = {"summary": series_status} if series_status else {}
+    if series_label:
+        series["displayName"] = series_label
+    if game_number is not None:
+        series["gameNumber"] = game_number
+    if round_name:
+        series["round"] = round_name
     if away_name:
         away_team["displayName"] = away_name
     if home_name:
@@ -767,7 +927,7 @@ def _espn_payload(
             {
                 "id": game_id,
                 "date": game_date,
-                "series": {"summary": series_status} if series_status else {},
+                "series": series,
                 "notes": [{"headline": note}] if note else [],
                 "status": {
                     "type": {
@@ -780,7 +940,7 @@ def _espn_payload(
                 "competitions": [
                     {
                         "id": game_id,
-                        "series": {"summary": series_status} if series_status else {},
+                        "series": series,
                         "competitors": [
                             {
                                 "homeAway": "away",

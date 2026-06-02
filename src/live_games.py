@@ -168,6 +168,68 @@ def _iter_text_candidates(value: Any) -> list[str]:
     return texts
 
 
+def _nested_marker_value(value: Any, keys: set[str]) -> Any:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key in keys and item not in (None, ""):
+                return item
+            nested = _nested_marker_value(item, keys)
+            if nested not in (None, ""):
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _nested_marker_value(item, keys)
+            if nested not in (None, ""):
+                return nested
+    return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _game_number_from_context(event: dict[str, Any], competition: dict[str, Any], candidates: list[str]) -> int | None:
+    value = _nested_marker_value(event, {"gamenumber"}) or _nested_marker_value(competition, {"gamenumber"})
+    game_number = _int_or_none(value)
+    if game_number is not None:
+        return game_number
+
+    for text in candidates:
+        match = re.search(r"\bgame\s+([1-7])\b", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _has_playoff_marker(event: dict[str, Any], competition: dict[str, Any], candidates: list[str], game_number: int | None) -> bool:
+    if game_number is not None:
+        return True
+    if _nested_marker_value(event, {"round", "serieslabel"}) or _nested_marker_value(competition, {"round", "serieslabel"}):
+        return True
+    marker_text = " ".join(candidates).lower()
+    return any(
+        marker in marker_text
+        for marker in ("playoff", "finals", "semifinals", "conference finals", "first round", "second round")
+    )
+
+
+def _series_status_from_wins(away_abbr: str, home_abbr: str, away_wins: int, home_wins: int) -> str:
+    if away_wins == home_wins:
+        return f"Series tied {away_wins}-{home_wins}"
+
+    leader_abbr = away_abbr if away_wins > home_wins else home_abbr
+    leader_wins = max(away_wins, home_wins)
+    trailer_wins = min(away_wins, home_wins)
+    verb = "wins" if leader_wins >= 4 else "leads"
+    return f"{leader_abbr} {verb} {leader_wins}-{trailer_wins}"
+
+
 def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abbr: str, home_abbr: str) -> dict[str, Any]:
     candidates = _iter_text_candidates(event) + _iter_text_candidates(competition)
     series_status = ""
@@ -182,8 +244,19 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
         lowered = normalized.lower()
         if "if necessary" in lowered or "if-necessary" in lowered:
             if_necessary = True
-        if not series_status and ("leads" in lowered or "series tied" in lowered):
+        if not series_status and ("wins" in lowered or "won" in lowered or "leads" in lowered or "series tied" in lowered):
             series_status = _canonicalize_series_status(normalized)
+
+        winner_match = re.search(
+            r"\b([A-Z]{2,4})\s+(?:wins|won)(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if winner_match and leader_wins is None:
+            leader_abbr = canonical_team_abbr(winner_match.group(1))
+            leader_wins = int(winner_match.group(2))
+            trailer_wins = int(winner_match.group(3))
+            series_status = f"{leader_abbr} wins {leader_wins}-{trailer_wins}"
 
         leader_match = re.search(
             r"\b([A-Z]{2,4})\s+leads(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
@@ -217,7 +290,26 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
             away_wins = trailer_wins
             home_wins = leader_wins
 
-    game_number = away_wins + home_wins + 1 if away_wins is not None and home_wins is not None else None
+    parsed_game_number = _game_number_from_context(event, competition, candidates)
+
+    if away_wins is not None and home_wins is not None:
+        completed_series = max(away_wins, home_wins) >= 4
+        game_number = away_wins + home_wins if completed_series else away_wins + home_wins + 1
+    else:
+        game_number = parsed_game_number
+
+    if (
+        away_wins is None
+        and home_wins is None
+        and game_number == 1
+        and _has_playoff_marker(event, competition, candidates, game_number)
+    ):
+        away_wins = 0
+        home_wins = 0
+
+    if not series_status and away_wins is not None and home_wins is not None:
+        series_status = _series_status_from_wins(away_abbr, home_abbr, away_wins, home_wins)
+
     return {
         "series_status": series_status,
         "if_necessary": if_necessary,
@@ -341,8 +433,16 @@ def _is_completed_game(game: dict[str, Any]) -> bool:
     return int(game.get("status_id", 0) or 0) == 3 or status_text in {"final", "completed", "complete"}
 
 
+def _is_unnecessary_game(game: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(game.get(key) or "")
+        for key in ("status_text", "series_status", "time_label", "date_label")
+    ).lower()
+    return "unnecessary" in text
+
+
 def _is_upcoming_game(game: dict[str, Any]) -> bool:
-    return int(game.get("status_id", 0) or 0) in {1, 2}
+    return int(game.get("status_id", 0) or 0) in {1, 2} and not _is_unnecessary_game(game)
 
 
 def _log_debug(debug: bool, message: str) -> None:

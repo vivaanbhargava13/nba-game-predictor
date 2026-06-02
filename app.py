@@ -4,6 +4,7 @@ import os
 import json
 import html
 import queue
+import re
 import threading
 from datetime import date
 from functools import lru_cache
@@ -259,6 +260,11 @@ def series_status_text(
 ) -> tuple[str, str]:
     selected_wins = int(selected_wins)
     opponent_wins = int(opponent_wins)
+    if selected_wins >= 4 or opponent_wins >= 4:
+        if selected_wins > opponent_wins:
+            return f"{selected_abbr} wins {selected_wins}-{opponent_wins}", selected_abbr
+        if opponent_wins > selected_wins:
+            return f"{opponent_abbr} wins {opponent_wins}-{selected_wins}", opponent_abbr
     if selected_wins == opponent_wins:
         return f"Series tied {selected_wins}-{opponent_wins}", "Tied"
     if selected_wins > opponent_wins:
@@ -1403,9 +1409,68 @@ def _score_text(game: dict) -> str:
     return f"{html.escape(str(game.get('away_abbr', '')))} {away} - {home} {html.escape(str(game.get('home_abbr', '')))}"
 
 
+def _int_or_none(value) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _derived_series_status(game: dict, away_abbr: str, home_abbr: str) -> str:
+    series_status = str(game.get("series_status") or "").strip()
+    if series_status:
+        return series_status
+
+    has_playoff_marker = bool(game.get("round") or game.get("series_label") or game.get("game_number"))
+    if not has_playoff_marker:
+        return ""
+
+    away_wins = _int_or_none(game.get("away_series_wins"))
+    home_wins = _int_or_none(game.get("home_series_wins"))
+    game_number = _int_or_none(game.get("game_number"))
+    if away_wins is None and home_wins is None and game_number == 1:
+        away_wins = 0
+        home_wins = 0
+
+    if away_wins is None or home_wins is None:
+        return ""
+    if away_wins == home_wins:
+        return f"Series tied {away_wins}-{home_wins}"
+
+    leader_abbr = away_abbr if away_wins > home_wins else home_abbr
+    leader_wins = max(away_wins, home_wins)
+    trailer_wins = min(away_wins, home_wins)
+    verb = "wins" if leader_wins >= 4 else "leads"
+    return f"{leader_abbr} {verb} {leader_wins}-{trailer_wins}"
+
+
+def _live_series_status_text(game: dict) -> str:
+    away_status_wins = game.get("away_series_wins")
+    home_status_wins = game.get("home_series_wins")
+    if away_status_wins is not None and home_status_wins is not None:
+        away_wins = int(away_status_wins)
+        home_wins = int(home_status_wins)
+        if max(away_wins, home_wins) >= 4:
+            winner = str(game.get("away_abbr") if away_wins > home_wins else game.get("home_abbr"))
+            return f"{winner} wins {max(away_wins, home_wins)}-{min(away_wins, home_wins)}"
+
+    series_status = str(game.get("series_status") or "").strip()
+    match = re.search(
+        r"\b([A-Z]{2,4})\s+(?:wins|leads)(?:\s+(?:the\s+)?series)?\s+(4)\s*[-–]\s*(\d+)",
+        series_status,
+        re.IGNORECASE,
+    )
+    if match:
+        winner = match.group(1).upper()
+        return f"{winner} wins 4-{int(match.group(3))}"
+    return series_status
+
+
 def live_game_context_lines(game: dict) -> list[str]:
     lines: list[str] = []
-    series_status = str(game.get("series_status") or "").strip()
+    series_status = _live_series_status_text(game)
     if series_status:
         lines.append(series_status)
     if bool(game.get("if_necessary")):
@@ -1429,6 +1494,8 @@ def live_game_prediction_context(game: dict) -> dict:
     home_series_wins = game.get("home_series_wins")
     has_series_context = (
         bool(game.get("series_status"))
+        or bool(game.get("round"))
+        or bool(game.get("series_label"))
         or bool(game.get("if_necessary"))
         or game.get("game_number") is not None
         or away_series_wins is not None
@@ -1683,6 +1750,8 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
     home_series_wins = game.get("home_series_wins")
     has_series_context = (
         bool(game.get("series_status"))
+        or bool(game.get("round"))
+        or bool(game.get("series_label"))
         or bool(game.get("if_necessary"))
         or game.get("game_number") is not None
         or away_series_wins is not None
@@ -1691,10 +1760,10 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
     game_number = int(game.get("game_number") or 1)
     game_number = min(7, max(1, game_number))
     team_a_series_wins = int(away_series_wins or 0)
-    if game_number == 7:
-        team_a_series_wins = 3
-    else:
+    team_b_series_wins = int(home_series_wins or 0)
+    if game_number != 7:
         team_a_series_wins = min(team_a_series_wins, max(0, game_number - 1))
+        team_b_series_wins = min(team_b_series_wins, max(0, game_number - 1))
 
     return {
         "selected_team_label": away_label,
@@ -1706,6 +1775,7 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
         "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
         "game_number": game_number,
         "team_a_series_wins": team_a_series_wins,
+        "team_b_series_wins": team_b_series_wins,
         "raw_live_game_series_label": str(game.get("series_status") or ""),
     }
 
@@ -1715,15 +1785,28 @@ def live_game_payload(game: dict) -> dict:
     away_series_wins = game.get("away_series_wins")
     home_series_wins = game.get("home_series_wins")
     game_number = game.get("game_number")
+    away_abbr = str(game.get("away_abbr") or "")
+    home_abbr = str(game.get("home_abbr") or "")
+    has_playoff_marker = bool(game.get("round") or game.get("series_label") or game_number)
+    if (
+        has_playoff_marker
+        and _int_or_none(game_number) == 1
+        and _int_or_none(away_series_wins) is None
+        and _int_or_none(home_series_wins) is None
+    ):
+        away_series_wins = 0
+        home_series_wins = 0
     return {
         "game_id": str(game.get("game_id") or ""),
-        "away_abbr": str(game.get("away_abbr") or ""),
-        "home_abbr": str(game.get("home_abbr") or ""),
+        "away_abbr": away_abbr,
+        "home_abbr": home_abbr,
         "game_datetime": game.get("game_datetime"),
         "game_date": game_date.isoformat(),
         "game_time": str(game.get("time_label") or game.get("date_label") or ""),
         "season": nba_season_from_date(game_date),
-        "series_status": str(game.get("series_status") or ""),
+        "series_status": _derived_series_status(game, away_abbr, home_abbr),
+        "round": game.get("round"),
+        "series_label": game.get("series_label"),
         "game_number": None if game_number is None else int(game_number),
         "away_series_wins": None if away_series_wins is None else int(away_series_wins),
         "home_series_wins": None if home_series_wins is None else int(home_series_wins),

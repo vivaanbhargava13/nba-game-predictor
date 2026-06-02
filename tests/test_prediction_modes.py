@@ -67,6 +67,12 @@ class PredictionModeTests(unittest.TestCase):
         self.assertEqual(status, "NYK leads 3-0")
         self.assertEqual(leader, "NYK")
 
+    def test_series_status_text_completed_series_wins(self):
+        status, leader = series_status_text("NYK", "SAS", 3, 4)
+
+        self.assertEqual(status, "SAS wins 4-3")
+        self.assertEqual(leader, "SAS")
+
     def test_series_status_text_opponent_leads(self):
         status, leader = series_status_text("CLE", "NYK", 0, 3)
 
