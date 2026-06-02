@@ -7,6 +7,7 @@ from src.nba_data import (
     build_matchup_feature_row,
     _games_before_date,
     _head_to_head_features,
+    _playoff_form_features,
     _playoff_context_features,
     _recent_form_features,
     _rest_features,
@@ -389,6 +390,54 @@ class NextStepFeatureTests(unittest.TestCase):
 
         self.assertNotEqual(regular["OFF_RATING_DIFF"], playoffs["OFF_RATING_DIFF"])
 
+    def test_playoff_form_features_use_only_games_before_target(self):
+        logs = _playoff_game_logs_with_future_game()
+        target_date = pd.Timestamp("2025-04-25")
+        team_a_prior = _games_before_date(logs, 1, target_date)
+        team_b_prior = _games_before_date(logs, 2, target_date)
+
+        features = _playoff_form_features(team_a_prior, team_b_prior)
+
+        self.assertEqual(features["playoff_net_rating_diff"], 14.0)
+        self.assertEqual(features["playoff_off_rating_diff"], 10.0)
+        self.assertEqual(features["playoff_def_rating_diff"], 4.0)
+        self.assertEqual(features["last_5_playoff_net_rating_diff"], 14.0)
+        self.assertEqual(features["last_5_playoff_point_diff"], 14.0)
+
+    def test_playoff_form_features_game_one_handles_no_prior_playoff_games(self):
+        features = _playoff_form_features(pd.DataFrame(), pd.DataFrame())
+
+        self.assertEqual(features["playoff_net_rating_diff"], 0.0)
+        self.assertEqual(features["playoff_off_rating_diff"], 0.0)
+        self.assertEqual(features["playoff_def_rating_diff"], 0.0)
+        self.assertEqual(features["last_5_playoff_net_rating_diff"], 0.0)
+        self.assertEqual(features["last_5_playoff_point_diff"], 0.0)
+
+    def test_build_matchup_playoff_form_has_no_future_leakage(self):
+        regular_logs = _sample_game_logs()
+        playoff_logs = _playoff_game_logs_with_future_game()
+
+        with (
+            patch("src.nba_data.load_team_stats", return_value=_team_stats("Regular Season")),
+            patch("src.nba_data.load_all_team_game_logs", return_value=regular_logs),
+            patch("src.nba_data.load_player_stats_before_date", return_value=pd.DataFrame()),
+            patch("src.nba_data.load_playoff_games", return_value=pd.DataFrame()),
+            patch("src.nba_data.load_team_seeds", return_value={}),
+        ):
+            features = build_matchup_feature_row(
+                season="2024-25",
+                team_a_id=1,
+                team_b_id=2,
+                prediction_date="2025-04-25",
+                home_team_id=1,
+                game_logs=regular_logs,
+                playoff_game_logs=playoff_logs,
+            )
+
+        self.assertEqual(features["playoff_net_rating_diff"], 14.0)
+        self.assertEqual(features["last_5_playoff_point_diff"], 14.0)
+        self.assertNotEqual(features["playoff_net_rating_diff"], -36.0)
+
 
 def _team_stats(season_type: str) -> pd.DataFrame:
     if season_type == "Regular Season":
@@ -451,6 +500,49 @@ def _sample_game_logs() -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _playoff_game_logs_with_future_game() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "TEAM_ID": 1,
+                "GAME_ID": "prior",
+                "GAME_DATE": pd.Timestamp("2025-04-20"),
+                "POINT_DIFF": 7,
+                "OFF_RATING_GAME": 115.0,
+                "DEF_RATING_GAME": 101.0,
+                "NET_RATING_GAME": 14.0,
+            },
+            {
+                "TEAM_ID": 2,
+                "GAME_ID": "prior",
+                "GAME_DATE": pd.Timestamp("2025-04-20"),
+                "POINT_DIFF": -7,
+                "OFF_RATING_GAME": 105.0,
+                "DEF_RATING_GAME": 105.0,
+                "NET_RATING_GAME": 0.0,
+            },
+            {
+                "TEAM_ID": 1,
+                "GAME_ID": "future",
+                "GAME_DATE": pd.Timestamp("2025-04-30"),
+                "POINT_DIFF": -50,
+                "OFF_RATING_GAME": 80.0,
+                "DEF_RATING_GAME": 130.0,
+                "NET_RATING_GAME": -50.0,
+            },
+            {
+                "TEAM_ID": 2,
+                "GAME_ID": "future",
+                "GAME_DATE": pd.Timestamp("2025-04-30"),
+                "POINT_DIFF": 50,
+                "OFF_RATING_GAME": 130.0,
+                "DEF_RATING_GAME": 80.0,
+                "NET_RATING_GAME": 50.0,
+            },
+        ]
+    )
 
 
 if __name__ == "__main__":

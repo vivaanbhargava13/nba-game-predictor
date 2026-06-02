@@ -27,6 +27,7 @@ from sklearn.svm import SVC
 
 from .nba_data import (
     FEATURE_COLUMNS,
+    PLAYOFF_FORM_AUDIT_FEATURES,
     TIER_1_FEATURES,
     TIER_3_FEATURES,
     TIER_4_FEATURES,
@@ -762,96 +763,32 @@ def build_calibrated_feature_audit_sets(
     """Return calibrated Random Forest audit groups without changing production defaults."""
     home_feature_columns = home_feature_columns or HOME_ADVANTAGE_FEATURES
     production = _available_features(TIER_1_FEATURES + home_feature_columns + SEED_DIRECTION_FEATURES, training_frame)
-    non_leaky_features = [
-        feature
-        for feature in DIFF_COLUMNS
-        if feature in training_frame.columns and feature not in NON_LEAKY_AUDIT_EXCLUDED_FEATURES
-    ]
-    without_seed = [feature for feature in production if feature not in SEED_DIRECTION_FEATURES]
-    without_home = [feature for feature in production if feature not in set(home_feature_columns)]
-    playoff_with_context = _available_features(production + SERIES_CONTEXT_FEATURES, training_frame)
+    playoff_form = _available_features(PLAYOFF_FORM_AUDIT_FEATURES, training_frame)
+    elo_features = _available_features(SEASON_RESET_ELO_FEATURES + OFFSEASON_REGRESSED_ELO_COLUMNS, training_frame)
+    rest_features = _available_features(REST_BACK_TO_BACK_FEATURES, training_frame)
 
     current_calibration = PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][1]
-    playoff_calibration = PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_PLAYOFF][1]
     return {
         "current_production_features": (production, PREDICTION_MODE_CURRENT, current_calibration),
-        "production_plus_h2h": (
-            _available_features(production + TIER_8_FEATURES, training_frame),
+        "production_plus_playoff_form": (
+            _available_features(production + playoff_form, training_frame),
             PREDICTION_MODE_CURRENT,
             current_calibration,
         ),
-        "production_plus_style_matchups": (
-            _available_features(production + TIER_10_FEATURES, training_frame),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_weighted_recent_form": (
-            _available_features(production + WEIGHTED_RECENT_FEATURES, training_frame),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_season_reset_elo": (
-            _available_features(production + SEASON_RESET_ELO_FEATURES, training_frame),
+        "production_plus_elo": (
+            _available_features(production + elo_features, training_frame),
             PREDICTION_MODE_CURRENT,
             current_calibration,
         ),
         "production_plus_rest": (
-            _available_features(production + REST_BACK_TO_BACK_FEATURES, training_frame),
+            _available_features(production + rest_features, training_frame),
             PREDICTION_MODE_CURRENT,
             current_calibration,
         ),
-        "production_plus_rolling_form": (
-            _available_features(production + ROLLING_RECENT_FORM_AUDIT_FEATURES, training_frame),
+        "production_plus_playoff_form_elo_rest": (
+            _available_features(production + playoff_form + elo_features + rest_features, training_frame),
             PREDICTION_MODE_CURRENT,
             current_calibration,
-        ),
-        "production_plus_elo_rest_rolling_form": (
-            _available_features(
-                production + SEASON_RESET_ELO_FEATURES + REST_BACK_TO_BACK_FEATURES + ROLLING_RECENT_FORM_AUDIT_FEATURES,
-                training_frame,
-            ),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_offseason_regressed_elo_0_25": (
-            _available_features(production + OFFSEASON_REGRESSED_ELO_FEATURES[0.25], training_frame),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_offseason_regressed_elo_0_5": (
-            _available_features(production + OFFSEASON_REGRESSED_ELO_FEATURES[0.5], training_frame),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_star_player_features": (
-            _available_features(production + TIER_3_FEATURES, training_frame),
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_plus_all_non_leaky_features": (
-            non_leaky_features,
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_without_seed_features": (
-            without_seed,
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "production_without_home_features": (
-            without_home,
-            PREDICTION_MODE_CURRENT,
-            current_calibration,
-        ),
-        "playoff_context_without_game_number_elimination": (
-            production,
-            PREDICTION_MODE_PLAYOFF,
-            playoff_calibration,
-        ),
-        "playoff_context_with_game_number_elimination": (
-            playoff_with_context,
-            PREDICTION_MODE_PLAYOFF,
-            playoff_calibration,
         ),
     }
 

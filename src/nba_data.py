@@ -40,6 +40,13 @@ TIER_2_FEATURES = [
     "weighted_recent_ts_pct_diff",
     "weighted_recent_def_rating_diff",
 ]
+PLAYOFF_FORM_AUDIT_FEATURES = [
+    "playoff_net_rating_diff",
+    "playoff_off_rating_diff",
+    "playoff_def_rating_diff",
+    "last_5_playoff_net_rating_diff",
+    "last_5_playoff_point_diff",
+]
 TIER_3_FEATURES = [
     "top_1_ppg_diff",
     "top_1_mpg_diff",
@@ -108,6 +115,7 @@ TIER_10_FEATURES = [
 MODEL_FEATURE_COLUMNS = (
     TIER_1_FEATURES
     + TIER_2_FEATURES
+    + PLAYOFF_FORM_AUDIT_FEATURES
     + TIER_3_FEATURES
     + TIER_4_FEATURES
     + TIER_5_FEATURES
@@ -117,7 +125,7 @@ MODEL_FEATURE_COLUMNS = (
     + TIER_9_FEATURES
     + TIER_10_FEATURES
 )
-FEATURE_SCHEMA_VERSION = "2026-05-26-feature-v7-cross-season-carryover-elo-audit"
+FEATURE_SCHEMA_VERSION = "2026-06-01-feature-v8-playoff-form-audit"
 
 # Human-readable notes for the expanded model. The code below follows these
 # definitions so every training and prediction path uses the same feature math.
@@ -517,7 +525,7 @@ def _team_strength_features(stats_a: pd.Series, stats_b: pd.Series) -> dict[str,
         for column in TEAM_STRENGTH_COLUMNS
     }
     # Lower defensive rating is better, so invert this one to keep positive values
-    # aligned with better Team A title odds.
+    # aligned with stronger Team A defense.
     features["DEF_RATING_DIFF"] = float(stats_b["DEF_RATING"]) - float(stats_a["DEF_RATING"])
     return features
 
@@ -576,6 +584,33 @@ def _safe_divide(numerator: float, denominator: float) -> float:
     if denominator == 0 or pd.isna(denominator):
         return np.nan
     return float(numerator / denominator)
+
+
+def _safe_prior_mean(games: pd.DataFrame, column: str) -> float:
+    if games.empty or column not in games.columns:
+        return 0.0
+    value = games[column].mean()
+    return 0.0 if pd.isna(value) else float(value)
+
+
+def _safe_recent_form_value(games: pd.DataFrame, window: int, column: str) -> float:
+    value = _recent_form_value(games, window, column)
+    return 0.0 if pd.isna(value) else float(value)
+
+
+def _playoff_form_features(team_a_games: pd.DataFrame, team_b_games: pd.DataFrame) -> dict[str, float]:
+    return {
+        "playoff_net_rating_diff": _safe_prior_mean(team_a_games, "NET_RATING_GAME")
+        - _safe_prior_mean(team_b_games, "NET_RATING_GAME"),
+        "playoff_off_rating_diff": _safe_prior_mean(team_a_games, "OFF_RATING_GAME")
+        - _safe_prior_mean(team_b_games, "OFF_RATING_GAME"),
+        "playoff_def_rating_diff": _safe_prior_mean(team_b_games, "DEF_RATING_GAME")
+        - _safe_prior_mean(team_a_games, "DEF_RATING_GAME"),
+        "last_5_playoff_net_rating_diff": _safe_recent_form_value(team_a_games, 5, "NET_RATING_GAME")
+        - _safe_recent_form_value(team_b_games, 5, "NET_RATING_GAME"),
+        "last_5_playoff_point_diff": _safe_recent_form_value(team_a_games, 5, "POINT_DIFF")
+        - _safe_recent_form_value(team_b_games, 5, "POINT_DIFF"),
+    }
 
 
 def _efficiency_values(games: pd.DataFrame) -> dict[str, float]:
@@ -1078,6 +1113,7 @@ def build_matchup_feature_row(
     cache_dir: str | Path = "data/raw",
     feature_season_type: str = "Regular Season",
     game_logs: pd.DataFrame | None = None,
+    playoff_game_logs: pd.DataFrame | None = None,
     player_stats: pd.DataFrame | None = None,
     playoff_games: pd.DataFrame | None = None,
     seeds: dict[int, int] | None = None,
@@ -1114,6 +1150,9 @@ def build_matchup_feature_row(
 
     team_a_games = _games_before_date(game_logs, team_a_id, prediction_date)
     team_b_games = _games_before_date(game_logs, team_b_id, prediction_date)
+    playoff_game_logs = playoff_game_logs if playoff_game_logs is not None else pd.DataFrame()
+    team_a_playoff_games = _games_before_date(playoff_game_logs, team_a_id, prediction_date)
+    team_b_playoff_games = _games_before_date(playoff_game_logs, team_b_id, prediction_date)
     if team_a_games.empty or team_b_games.empty:
         missing = []
         if team_a_games.empty:
@@ -1125,6 +1164,7 @@ def build_matchup_feature_row(
     features = {
         **_team_strength_features(stats_by_team.loc[team_a_id], stats_by_team.loc[team_b_id]),
         **_recent_form_features(team_a_games, team_b_games),
+        **_playoff_form_features(team_a_playoff_games, team_b_playoff_games),
         **_weighted_recent_features(team_a_games, team_b_games),
         **_star_power_features(player_stats_a, player_stats_b),
         **_home_court_features(team_a_games, team_b_games, team_a_id, home_team_id),
@@ -1203,6 +1243,7 @@ def _build_training_frame_for_season(
 
     print(f"  Loading team game logs for {season}")
     game_logs = load_all_team_game_logs(season, cache_dir, season_types=(feature_season_type,))
+    playoff_game_logs = load_all_team_game_logs(season, cache_dir, season_types=("Playoffs",))
     player_stats = load_player_stats_before_date(season, games["GAME_DATE"].max(), cache_dir)
     seeds = load_team_seeds(season, cache_dir)
     elo_snapshots = compute_elo_snapshots(game_logs)
@@ -1235,6 +1276,7 @@ def _build_training_frame_for_season(
                 cache_dir=cache_dir,
                 feature_season_type=feature_season_type,
                 game_logs=game_logs,
+                playoff_game_logs=playoff_game_logs,
                 player_stats=player_stats,
                 playoff_games=games,
                 seeds=seeds,

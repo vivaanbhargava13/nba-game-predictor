@@ -333,15 +333,17 @@ class ModelComparisonTests(unittest.TestCase):
             }
             self.assertTrue(required_columns.issubset(saved.columns))
             self.assertTrue(required_columns.issubset(audit.columns))
-            self.assertIn("current_production_features", set(saved["feature_set"]))
-            self.assertIn("production_plus_h2h", set(saved["feature_set"]))
-            self.assertIn("production_plus_season_reset_elo", set(saved["feature_set"]))
-            self.assertIn("production_plus_rest", set(saved["feature_set"]))
-            self.assertIn("production_plus_rolling_form", set(saved["feature_set"]))
-            self.assertIn("production_plus_elo_rest_rolling_form", set(saved["feature_set"]))
-            self.assertIn("production_plus_offseason_regressed_elo_0_25", set(saved["feature_set"]))
-            self.assertIn("production_plus_offseason_regressed_elo_0_5", set(saved["feature_set"]))
-            self.assertIn("playoff_context_with_game_number_elimination", set(saved["feature_set"]))
+            expected_sets = {
+                "current_production_features",
+                "production_plus_playoff_form",
+                "production_plus_elo",
+                "production_plus_rest",
+                "production_plus_playoff_form_elo_rest",
+            }
+            self.assertEqual(set(saved["feature_set"]), expected_sets)
+            combined_features = ",".join(saved["features"].astype(str))
+            self.assertIn("playoff_net_rating_diff", combined_features)
+            self.assertIn("last_5_playoff_point_diff", combined_features)
             self.assertTrue(saved["is_best_feature_set"].any())
             focused = pd.read_csv(focused_path)
             focused_required_columns = {
