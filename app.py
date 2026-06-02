@@ -890,6 +890,122 @@ def inject_dashboard_css() -> None:
                 margin-top: 0.45rem;
                 margin-bottom: 1.1rem;
             }}
+            .dashboard-header {{
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+                gap: 1rem;
+                align-items: center;
+                margin-bottom: 1.1rem;
+            }}
+            .dashboard-header .dashboard-subtitle {{
+                margin-bottom: 0;
+            }}
+            .model-status-card {{
+                position: relative;
+                overflow: hidden;
+                background: linear-gradient(180deg, rgba(249, 115, 22, 0.035), rgba(100, 116, 139, 0.025) 48%, var(--surface) 100%);
+                border: 1px solid var(--line);
+                border-radius: 12px;
+                padding: 0.9rem 0.95rem 0.82rem;
+                box-shadow: 0 12px 30px rgba(23, 32, 51, 0.07);
+                align-self: center;
+                min-width: 0;
+            }}
+            .model-status-card::before {{
+                content: "";
+                position: absolute;
+                inset: 0 0 auto;
+                height: 3px;
+                background: linear-gradient(90deg, #F97316 0%, #94A3B8 72%, #64748B 100%);
+            }}
+            .model-status-top {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.85rem;
+                margin-bottom: 0.6rem;
+            }}
+            .model-status-title {{
+                display: inline-flex;
+                align-items: center;
+                gap: 0.42rem;
+                color: var(--ink);
+                font-size: 0.8rem;
+                font-weight: 900;
+                line-height: 1;
+                text-transform: uppercase;
+                letter-spacing: 0.02em;
+            }}
+            .model-status-title::before {{
+                content: "";
+                width: 0.48rem;
+                height: 0.48rem;
+                border-radius: 999px;
+                background: #F97316;
+                box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.14);
+                flex: 0 0 auto;
+            }}
+            .model-status-badges {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.46rem;
+                margin-bottom: 0.55rem;
+            }}
+            .model-status-pill {{
+                display: inline-flex;
+                align-items: center;
+                border: 1px solid rgba(23, 32, 51, 0.1);
+                border-radius: 999px;
+                color: var(--ink);
+                font-size: 0.72rem;
+                font-weight: 800;
+                line-height: 1;
+                padding: 0.32rem 0.58rem;
+                white-space: nowrap;
+            }}
+            .model-status-pill[data-tone="warm"] {{
+                background: rgba(249, 115, 22, 0.14);
+                border-color: rgba(249, 115, 22, 0.3);
+                color: #9A4A0F;
+            }}
+            .model-status-pill[data-tone="cool"] {{
+                background: rgba(59, 130, 246, 0.11);
+                border-color: rgba(59, 130, 246, 0.24);
+                color: #1E4F8A;
+            }}
+            .model-status-limitations {{
+                color: #667085;
+                font-size: 0.69rem;
+                line-height: 1.3;
+            }}
+            .model-details-button {{
+                display: inline-flex;
+                align-items: center;
+                flex: 0 0 auto;
+                border: 1px solid rgba(100, 116, 139, 0.22);
+                border-radius: 999px;
+                padding: 0.25rem 0.58rem;
+                background: rgba(255, 255, 255, 0.72);
+                color: #475467;
+                font-size: 0.68rem;
+                font-weight: 800;
+                line-height: 1;
+                transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+            }}
+            .model-details-button:hover {{
+                background: #FFFFFF;
+                border-color: rgba(249, 115, 22, 0.34);
+                color: var(--ink);
+                box-shadow: 0 4px 12px rgba(23, 32, 51, 0.08);
+            }}
+            @media (max-width: 720px) {{
+                .dashboard-header {{
+                    grid-template-columns: 1fr;
+                }}
+                .model-status-card {{
+                    width: 100%;
+                }}
+            }}
             .live-games-board {{
                 display: grid;
                 grid-template-columns: 1fr 1fr;
@@ -1390,9 +1506,24 @@ def inject_team_css(team_a_abbreviation: str, team_b_abbreviation: str) -> tuple
 def render_header() -> None:
     st.markdown(
         """
-        <h1 class="dashboard-title">Game Predictor Dashboard</h1>
-        <div class="dashboard-subtitle">
-            Compare teams, inspect win probabilities, and review the model factors behind each prediction.
+        <div class="dashboard-header">
+            <div>
+                <h1 class="dashboard-title">Game Predictor Dashboard</h1>
+                <div class="dashboard-subtitle">
+                    Compare teams, inspect win probabilities, and review the model factors behind each prediction.
+                </div>
+            </div>
+            <div class="model-status-card">
+                <div class="model-status-top">
+                    <div class="model-status-title">Model Status</div>
+                    <span class="model-details-button">Details</span>
+                </div>
+                <div class="model-status-badges">
+                    <span class="model-status-pill" data-tone="warm">Calibrated RF</span>
+                    <span class="model-status-pill" data-tone="cool">Order-symmetric</span>
+                </div>
+                <div class="model-status-limitations">No odds • injuries • lineup/news</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
