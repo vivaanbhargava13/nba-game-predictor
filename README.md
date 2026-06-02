@@ -1,218 +1,244 @@
 # NBA Playoff Game Predictor
 
-A small Python project that uses `nba_api`, `pandas`, `scikit-learn`, and `seaborn` to predict NBA playoff game winners from team-level rating stats.
+NBA playoff matchup and series prediction dashboard built for concise, demo-ready model presentation.
 
-## Features
+[Live Demo](YOUR_STREAMLIT_APP_URL_HERE) · [Repository](.) · [Report Bug](REPORT_BUG_URL_HERE) · [Request Feature](REQUEST_FEATURE_URL_HERE)
 
-The model uses the difference between two teams for:
+## Table Of Contents
 
-Tier 1 team strength:
+- [About The Project](#about-the-project)
+- [Screenshots](#screenshots)
+- [Built With](#built-with)
+- [Key Features](#key-features)
+- [Live Demo](#live-demo)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+- [Usage](#usage)
+- [Deployment](#deployment)
+- [Model Methodology](#model-methodology)
+- [Model Dashboard](#model-dashboard)
+- [Testing](#testing)
+- [Training](#training)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+- [Contact](#contact)
+- [Acknowledgments](#acknowledgments)
 
-- Offensive Rating (`OFF_RATING`)
-- Defensive Rating (`DEF_RATING`)
-- Net Rating (`NET_RATING`)
-- Win percentage (`W_PCT`)
-- Point differential (`PLUS_MINUS`)
-- Pace (`PACE`)
+## About The Project
 
-Tier 2 recent form:
+NBA Playoff Game Predictor is a Streamlit dashboard for NBA playoff matchup and series prediction. It is a pure basketball-stat model: predictions are based on historical team performance features, not betting markets, injury reports, or breaking news.
 
-- Last 5 and last 10 win percentage
-- Last 5 and last 10 estimated net rating
-- Last 5 and last 10 average point differential
+The app presents game win probability, series win probability, prediction explainability, and a model dashboard popup for validation context. It is intended as a portfolio-ready demo of an end-to-end sports analytics workflow: data processing, feature engineering, calibrated modeling, interactive prediction, and model transparency.
 
-Tier 3 player availability / star power:
+[Back to top](#nba-playoff-game-predictor)
 
-- Top 3 and top 5 combined player points per game
-- Top 3 and top 5 combined player minutes per game
+## Screenshots
 
-Tier 4 home court:
+![Dashboard](docs/screenshots/dashboard.png)
 
-- Whether Team A is home
-- Selected home team's own home-court edge, clipped to avoid overpowered home swings
-- Legacy home/away split features kept for research ablation, but not used by the default production model
+![Model details](docs/screenshots/model_details.png)
 
-Tier 5 rest / fatigue:
+![Prediction explanation](docs/screenshots/prediction_explanation.png)
 
-- Team A rest days
-- Team B rest days
-- Rest-days difference
+[Back to top](#nba-playoff-game-predictor)
 
-Next-step features:
+## Built With
 
-- Pre-game Elo difference (`elo_diff`)
-- Efficiency differences before the prediction date: effective field goal percentage, true shooting percentage, turnover percentage, rebound share, assist/turnover ratio, and free throw rate
-- Stronger same-season head-to-head features: win percentage, margin, net rating, eFG%, TS%, turnover edge, and rebounding
-- Style matchup features for three-point profile, two-point scoring proxy, rebounding, turnover creation, and free throw pressure
-- Weighted recent-form features for wins, net rating, TS%, and defensive rating
-- Star-player features for top 1, top 3, and top 5 production/usage
-- Playoff context: seed difference, whether Team A has the higher seed, series game number, elimination-game flag, and series score difference
+- Python
+- Streamlit
+- pandas
+- scikit-learn
+- joblib
+- NBA data
 
-By default, it trains on regular-season team metrics and playoff game outcomes. That keeps the training setup cleaner than using full playoff metrics to predict playoff games that already happened.
+[Back to top](#nba-playoff-game-predictor)
 
-Recent-form, efficiency, head-to-head, Elo, rest, style matchup, and playoff context features are computed only from games before the playoff game or prediction date. Star-power features use regular-season player averages before the game date, so future playoff production is not used.
+## Key Features
 
-Prediction context modes:
+- Live, latest, and upcoming games view.
+- Matchup setup for Team A, Team B, home team, season, and prediction date.
+- Current hypothetical and playoff series context modes.
+- Order-symmetric predictions to reduce team-order bias.
+- Prediction explanation table with feature values and directional factors.
+- Model status/details dashboard with validation and calibration context.
+- Prediction chat grounded in the current matchup and model outputs.
 
-- `Current Hypothetical`: answers “if these teams played now.” Series fields are forced neutral: `game_number = 1`, `series_score_diff = 0`, and `elimination_game = 0`.
-- `Playoff Series Context`: optional user-supplied playoff-game context. You provide game number and each team’s series wins; the app computes series score difference and elimination-game status from those inputs.
-- Live scheduled-games mode is future work.
+[Back to top](#nba-playoff-game-predictor)
 
-## Setup
+## Live Demo
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+The public demo should be deployed on Streamlit Community Cloud:
 
-## Train the model
+`YOUR_STREAMLIT_APP_URL_HERE`
 
-```bash
-python -m src.predictor train --start-season 2015-16 --end-season 2024-25
-```
+After deployment, users can open the hosted app directly without running Streamlit locally.
 
-This saves:
+[Back to top](#nba-playoff-game-predictor)
 
-- `models/playoff_predictor.joblib`
-- cached NBA API data in `data/raw/`
-- processed feature rows in `data/processed/training_matchups_regular_season.csv` or `data/processed/training_matchups_playoffs.csv`
-- feature selection results in `data/processed/feature_selection.csv`
-- model comparison results in `data/processed/model_comparison.csv`
-- model calibration results in `data/processed/model_calibration.csv`
-- feature ablation results in `data/processed/feature_ablation.csv`
-- home-court feature ablation results in `data/processed/home_feature_ablation.csv`
-- feature importances in `data/processed/feature_importances.csv`
-- charts in `reports/figures/`
+## Getting Started
 
-By default, training compares Logistic Regression, Random Forest, Gradient Boosting, Extra Trees, SVC, AdaBoost, and KNN with a season-based validation split:
+Follow these steps to run the project locally.
 
-- Train: `2015-16` through `2022-23`
-- Test: `2023-24` through `2024-25`
+### Prerequisites
 
-It compares accuracy, ROC AUC, Brier score, log loss, precision, recall, and F1. Results are sorted by ROC AUC in `data/processed/model_comparison.csv`.
+- Python 3
+- `git`
+- Access to this repository
 
-For production model selection, the trainer also compares raw, sigmoid-calibrated, and isotonic-calibrated probabilities for Logistic Regression, Random Forest, and Extra Trees. Calibration curves and expected calibration error are saved to `data/processed/model_calibration.csv`. The selected model metadata records model type, calibration method, train/test seasons, feature set, and validation metrics.
+### Installation
 
-Before model comparison, the trainer ranks features with Extra Trees and evaluates top `5`, `10`, `15`, `20`, `25`, and `all` feature subsets using the same season split. It saves the subset results to `data/processed/feature_selection.csv` and trains the compared models using the best subset.
+1. Clone the repository.
 
-After model comparison, the trainer runs feature-group ablation for Random Forest and Extra Trees. It evaluates baseline features, corrected-sign features, H2H, style matchups, weighted recent form, star features, all features, and top `10`/`15`/`20` importance subsets. Results are saved to `data/processed/feature_ablation.csv`.
+   ```bash
+   git clone REPOSITORY_URL_HERE
+   cd Playoff\ Game\ Predictor
+   ```
 
-It also runs a home-court ablation that compares old split features, only the binary home-team flag, a clipped home-advantage feature, and clipped split features. Results are saved to `data/processed/home_feature_ablation.csv`. Training records one `selected_home_feature_design` and uses that same design in the printed output, model metadata, and production feature set.
+2. Create a virtual environment.
 
-The production artifact saves two mode-specific pipelines in `models/playoff_predictor.joblib`:
+   ```bash
+   python3 -m venv .venv
+   ```
 
-- `Current Hypothetical`: normal “if these teams played now” prediction with no series context.
-- `Playoff Series Context`: optional user-supplied series context using `game_number`, `series_score_diff`, and `elimination_game`.
+3. Activate the virtual environment.
 
-The current hypothetical production model uses the corrected baseline feature set, `baseline_plus_corrected_signs`, with the selected home-court design from `home_feature_ablation.csv`:
+   ```bash
+   source .venv/bin/activate
+   ```
 
-- `OFF_RATING_DIFF`
-- `DEF_RATING_DIFF`
-- `NET_RATING_DIFF`
-- `W_PCT_DIFF`
-- `PLUS_MINUS_DIFF`
-- `PACE_DIFF`
-- selected home-court feature columns: `home_team_A`, `clipped_home_win_pct_diff`, and `clipped_away_win_pct_diff`
-- `seed_difference`
-- `higher_seed_A`
+4. Install dependencies.
 
-The playoff-context production model uses the same features plus:
+   ```bash
+   ./.venv/bin/python -m pip install -r requirements.txt
+   ```
 
-- `game_number`
-- `series_score_diff`
-- `elimination_game`
+5. Start the app.
 
-Top-N research feature sets do not override these two production modes.
+   ```bash
+   ./.venv/bin/python -m streamlit run app.py
+   ```
 
-The expanded model pulls more NBA API data than the Tier 1 version because it needs team game logs and player averages. Successful API responses are cached, so the first run is the slowest.
+[Back to top](#nba-playoff-game-predictor)
 
-Training prints season and game progress as it builds rows. NBA API requests use retry/backoff with a short delay between calls. Player stats are cached once per season/date and reused across games; if that endpoint fails, training continues with neutral star-power defaults.
+## Usage
 
-Engineered training rows are cached in `data/processed/`. Cache filenames include the stats source, such as `training_matchups_regular_season.csv` and per-season files like `training_matchups_2023-24_regular_season.csv`, so Regular Season and Playoffs feature builds do not collide.
-
-Processed caches include a feature-schema marker. If `FEATURE_COLUMNS` changes, old processed files are ignored and rebuilt automatically.
-
-Force a fresh feature rebuild only when you need it:
+Run the dashboard:
 
 ```bash
-python -m src.predictor train --start-season 2015-16 --end-season 2024-25 --force-refresh
+./.venv/bin/python -m streamlit run app.py
 ```
 
-## Predict a matchup
+Run a CLI matchup prediction:
 
 ```bash
-python -m src.predictor predict --team1 BOS --team2 NYK --season 2024-25 --prediction-date 2025-04-19 --home-team team1
+./.venv/bin/python -m src.predictor predict --team1 BOS --team2 NYK --season 2024-25 --prediction-date 2025-04-19 --home-team team1
 ```
 
-You can also use full team names:
+Run a playoff series context prediction:
 
 ```bash
-python -m src.predictor predict --team1 "Boston Celtics" --team2 "New York Knicks" --season 2024-25 --prediction-date 2025-04-19 --home-team team1
+./.venv/bin/python -m src.predictor predict --team1 NYK --team2 BOS --season 2024-25 --prediction-date 2025-05-10 --home-team team1 --prediction-context-mode "Playoff Series Context" --game-number 6 --team-a-series-wins 3 --team-b-series-wins 2
 ```
 
-The prediction command prints the final feature row before calling the model, which is useful for checking `home_team_A`, `home_advantage_diff`, and any playoff context fields when enabled.
+[Back to top](#nba-playoff-game-predictor)
 
-To include explicit playoff-series context from the CLI, provide a valid game number and series score. The total series wins must equal `game_number - 1`.
+## Deployment
+
+Recommended public deployment path:
+
+1. Push the repository to GitHub.
+2. Deploy `app.py` on Streamlit Community Cloud.
+3. Set secrets in Streamlit Cloud if chat or API features are enabled.
+4. Never commit API keys.
+5. Replace `YOUR_STREAMLIT_APP_URL_HERE` in this README with the deployed URL.
+
+[Back to top](#nba-playoff-game-predictor)
+
+## Model Methodology
+
+The production model uses a calibrated Random Forest to estimate playoff win probabilities from basketball-stat features. Calibration improves probability quality so outputs can be interpreted as estimated probabilities rather than only class labels.
+
+Predictions use order-symmetric probability averaging:
+
+```text
+p_A_direct = P(A beats B)
+p_A_reverse = 1 - P(B beats A)
+p_A_final = (p_A_direct + p_A_reverse) / 2
+```
+
+Production feature groups include:
+
+- Rating differentials
+- Win percentage
+- Plus-minus
+- Pace
+- Clipped home/away splits
+- Seeding
+
+[Back to top](#nba-playoff-game-predictor)
+
+## Model Dashboard
+
+The model details dashboard is designed to make the prediction system presentable during a demo. It highlights:
+
+- ROC AUC hero metric
+- Validation metrics
+- Feature importances
+- Calibration summary
+
+[Back to top](#nba-playoff-game-predictor)
+
+## Testing
 
 ```bash
-python -m src.predictor predict --team1 NYK --team2 BOS --season 2024-25 --prediction-date 2025-05-10 --home-team team1 --prediction-context-mode "Playoff Series Context" --game-number 6 --team-a-series-wins 3 --team-b-series-wins 2
+./.venv/bin/python -m unittest discover -s tests
 ```
 
-To sanity-check home-court sensitivity after retraining the expanded model:
+[Back to top](#nba-playoff-game-predictor)
+
+## Training
 
 ```bash
-python -m src.predictor sanity-home-away --team1 CLE --team2 NYK --season 2024-25 --prediction-date 2025-04-19
+./.venv/bin/python -m src.predictor train --start-season 2015-16 --end-season 2024-25
 ```
 
-## Run the Streamlit app
+Training writes processed data, model comparison outputs, calibration outputs, feature importances, and the production model artifact used by the app.
 
-Train the model first if `models/playoff_predictor.joblib` does not exist:
+[Back to top](#nba-playoff-game-predictor)
 
-```bash
-python -m src.predictor train --start-season 2015-16 --end-season 2024-25
-```
+## Limitations
 
-Then start the GUI:
+- No betting odds.
+- No injuries or player availability.
+- No lineup news.
+- No breaking news.
+- No live market data.
+- Statistical baseline only.
+- Not betting advice.
 
-```bash
-streamlit run app.py
-```
+[Back to top](#nba-playoff-game-predictor)
 
-The app lets you choose Team A, Team B, the home team, season, stats source, prediction date, and prediction mode.
+## Roadmap
 
-In `Current Hypothetical`, series context is hidden and forced neutral. In `Playoff Series Context`, the app shows compact series-score controls. The score must be valid for the chosen game number, for example Game 7 requires the series wins to add up to 6.
+- Injury and player availability features
+- Richer calibration monitoring
+- Live benchmark comparison
+- Public deployment polish
+- README badges
 
-The app also shows explainability outputs:
+[Back to top](#nba-playoff-game-predictor)
 
-- Top 10 feature importances
-- Feature values used for the current prediction
-- Top factors pushing toward Team A or Team B
-- Saved prediction explanations in `data/processed/prediction_explanations.csv`
-- A matchup explanation chat panel for follow-up questions about the current prediction
+## Contact
 
-The chat panel is grounded only in the current matchup context: teams, season, prediction date, home team, probabilities, model factors, feature values, feature importances, and saved model metrics. It does not include injuries, lineup news, trades, or other external facts.
+Project Link: [Repository](.)
 
-The app uses the OpenAI API only when `OPENAI_API_KEY` is available. Without a key, it falls back to deterministic local responses and keeps running.
+[Back to top](#nba-playoff-game-predictor)
 
-Optional OpenAI setup:
+## Acknowledgments
 
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_MODEL="gpt-4o-mini"
-streamlit run app.py
-```
+- Best-README-Template for README structure inspiration.
+- NBA data sources used by the project.
+- Python, Streamlit, pandas, scikit-learn, and joblib communities.
 
-Chat transcripts are saved to `data/processed/prediction_chats.csv`.
-
-## Explore the data
-
-```bash
-python -m src.predictor visualize --season 2023-24
-```
-
-This creates seaborn plots for rating relationships and team metric correlations.
-
-## Notes
-
-The NBA Stats API can occasionally rate-limit or time out. This project caches successful responses under `data/raw/`, so repeated runs are faster and more reliable.
+[Back to top](#nba-playoff-game-predictor)
