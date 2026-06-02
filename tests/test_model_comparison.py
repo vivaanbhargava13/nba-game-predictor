@@ -8,6 +8,7 @@ from src.model import (
     PRODUCTION_MODEL_DEFAULTS,
     PRODUCTION_FEATURE_COLUMNS,
     PRODUCTION_FEATURE_SET_NAME,
+    PRODUCTION_HOME_FEATURE_SET_NAME,
     PLAYOFF_CONTEXT_FEATURE_COLUMNS,
     PREDICTION_MODE_CURRENT,
     PREDICTION_MODE_PLAYOFF,
@@ -150,7 +151,8 @@ class ModelComparisonTests(unittest.TestCase):
                 "PLUS_MINUS_DIFF",
                 "PACE_DIFF",
                 "home_team_A",
-                "home_advantage_diff",
+                "clipped_home_win_pct_diff",
+                "clipped_away_win_pct_diff",
                 "seed_difference",
                 "higher_seed_A",
             ],
@@ -253,8 +255,21 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertIn("validation_rank", saved["metadata"]["selected_models"][PREDICTION_MODE_CURRENT]["metrics"])
             self.assertIn("selected_by", saved["metadata"]["selected_models"][PREDICTION_MODE_PLAYOFF]["metrics"])
             self.assertEqual(saved["metadata"]["selected_home_feature_design"], saved["selected_home_feature_design"])
+            self.assertEqual(saved["metadata"]["selected_home_feature_design"], PRODUCTION_HOME_FEATURE_SET_NAME)
+            self.assertEqual(saved["home_feature_set"], PRODUCTION_HOME_FEATURE_SET_NAME)
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_CURRENT)["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
             self.assertEqual(get_model_entry_for_mode(artifact, PREDICTION_MODE_PLAYOFF)["feature_columns"], PLAYOFF_CONTEXT_FEATURE_COLUMNS)
+            self.assertEqual(PRODUCTION_HOME_FEATURE_SET_NAME, "clipped_home_split_features")
+            self.assertIn("clipped_home_win_pct_diff", PRODUCTION_FEATURE_COLUMNS)
+            self.assertIn("clipped_away_win_pct_diff", PRODUCTION_FEATURE_COLUMNS)
+            self.assertNotIn("home_advantage_diff", PRODUCTION_FEATURE_COLUMNS)
+            self.assertFalse(
+                any(
+                    market_feature in feature.lower()
+                    for feature in PRODUCTION_FEATURE_COLUMNS
+                    for market_feature in ("odds", "market", "spread", "moneyline")
+                )
+            )
             self.assertEqual(saved["current_hypothetical_features"], saved["playoff_context_features"])
             self.assertFalse(saved["metadata"]["series_context_used_for_game_prediction"])
             self.assertTrue(saved["metadata"]["series_context_used_for_series_probability"])
@@ -335,6 +350,8 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertTrue(required_columns.issubset(audit.columns))
             expected_sets = {
                 "current_production_features",
+                "prior_clipped_home_away_splits",
+                "production_plus_clipped_home_away_splits",
                 "production_plus_playoff_form",
                 "production_plus_elo",
                 "production_plus_rest",
@@ -342,8 +359,20 @@ class ModelComparisonTests(unittest.TestCase):
             }
             self.assertEqual(set(saved["feature_set"]), expected_sets)
             combined_features = ",".join(saved["features"].astype(str))
+            feature_text_by_set = dict(zip(saved["feature_set"], saved["features"]))
+            self.assertNotIn("home_advantage_diff", feature_text_by_set["current_production_features"])
+            self.assertIn("clipped_home_win_pct_diff", feature_text_by_set["current_production_features"])
+            self.assertIn("clipped_away_win_pct_diff", feature_text_by_set["current_production_features"])
+            self.assertNotIn("home_advantage_diff", feature_text_by_set["prior_clipped_home_away_splits"])
+            self.assertIn("clipped_home_win_pct_diff", feature_text_by_set["prior_clipped_home_away_splits"])
+            self.assertIn("clipped_away_win_pct_diff", feature_text_by_set["prior_clipped_home_away_splits"])
+            self.assertIn("home_advantage_diff", feature_text_by_set["production_plus_clipped_home_away_splits"])
+            self.assertIn("clipped_home_win_pct_diff", feature_text_by_set["production_plus_clipped_home_away_splits"])
+            self.assertIn("clipped_away_win_pct_diff", feature_text_by_set["production_plus_clipped_home_away_splits"])
             self.assertIn("playoff_net_rating_diff", combined_features)
             self.assertIn("last_5_playoff_point_diff", combined_features)
+            for market_feature in ("odds", "market", "spread", "moneyline"):
+                self.assertNotIn(market_feature, combined_features.lower())
             self.assertTrue(saved["is_best_feature_set"].any())
             focused = pd.read_csv(focused_path)
             focused_required_columns = {

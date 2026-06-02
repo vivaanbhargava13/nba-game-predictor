@@ -69,14 +69,14 @@ OLD_HOME_SPLIT_FEATURES = ["home_team_A", "home_win_pct_diff", "away_win_pct_dif
 ONLY_HOME_TEAM_FEATURES = ["home_team_A"]
 HOME_ADVANTAGE_FEATURES = ["home_team_A", "home_advantage_diff"]
 CLIPPED_HOME_SPLIT_FEATURES = ["home_team_A", "clipped_home_win_pct_diff", "clipped_away_win_pct_diff"]
-PRODUCTION_HOME_FEATURE_SET_NAME = "home_advantage_diff"
+PRODUCTION_HOME_FEATURE_SET_NAME = "clipped_home_split_features"
 HOME_FEATURE_SET_COLUMNS = {
     "old_home_split_features": OLD_HOME_SPLIT_FEATURES,
     "only_home_team_A": ONLY_HOME_TEAM_FEATURES,
     "home_advantage_diff": HOME_ADVANTAGE_FEATURES,
     "clipped_home_split_features": CLIPPED_HOME_SPLIT_FEATURES,
 }
-PRODUCTION_FEATURE_COLUMNS = TIER_1_FEATURES + HOME_ADVANTAGE_FEATURES + SEED_DIRECTION_FEATURES
+PRODUCTION_FEATURE_COLUMNS = TIER_1_FEATURES + CLIPPED_HOME_SPLIT_FEATURES + SEED_DIRECTION_FEATURES
 # Playoff context is used for display/chat/series simulation, not single-game predict_proba.
 PLAYOFF_CONTEXT_FEATURE_COLUMNS = PRODUCTION_FEATURE_COLUMNS
 PREDICTION_MODE_CURRENT = "Current Hypothetical"
@@ -761,8 +761,19 @@ def build_calibrated_feature_audit_sets(
     home_feature_columns: list[str] | None = None,
 ) -> dict[str, tuple[list[str], str, str]]:
     """Return calibrated Random Forest audit groups without changing production defaults."""
-    home_feature_columns = home_feature_columns or HOME_ADVANTAGE_FEATURES
+    home_feature_columns = home_feature_columns or HOME_FEATURE_SET_COLUMNS[PRODUCTION_HOME_FEATURE_SET_NAME]
     production = _available_features(TIER_1_FEATURES + home_feature_columns + SEED_DIRECTION_FEATURES, training_frame)
+    clipped_home_splits = _available_features(
+        TIER_1_FEATURES + CLIPPED_HOME_SPLIT_FEATURES + SEED_DIRECTION_FEATURES,
+        training_frame,
+    )
+    home_advantage_plus_clipped_splits = _available_features(
+        TIER_1_FEATURES
+        + HOME_ADVANTAGE_FEATURES
+        + ["clipped_home_win_pct_diff", "clipped_away_win_pct_diff"]
+        + SEED_DIRECTION_FEATURES,
+        training_frame,
+    )
     playoff_form = _available_features(PLAYOFF_FORM_AUDIT_FEATURES, training_frame)
     elo_features = _available_features(SEASON_RESET_ELO_FEATURES + OFFSEASON_REGRESSED_ELO_COLUMNS, training_frame)
     rest_features = _available_features(REST_BACK_TO_BACK_FEATURES, training_frame)
@@ -770,6 +781,12 @@ def build_calibrated_feature_audit_sets(
     current_calibration = PRODUCTION_MODEL_DEFAULTS[PREDICTION_MODE_CURRENT][1]
     return {
         "current_production_features": (production, PREDICTION_MODE_CURRENT, current_calibration),
+        "prior_clipped_home_away_splits": (clipped_home_splits, PREDICTION_MODE_CURRENT, current_calibration),
+        "production_plus_clipped_home_away_splits": (
+            home_advantage_plus_clipped_splits,
+            PREDICTION_MODE_CURRENT,
+            current_calibration,
+        ),
         "production_plus_playoff_form": (
             _available_features(production + playoff_form, training_frame),
             PREDICTION_MODE_CURRENT,
@@ -836,6 +853,14 @@ def evaluate_calibrated_feature_audit(
                 "expected_calibration_error": _expected_calibration_error(test_df["TEAM_A_WON"], probabilities),
             }
         )
+        print(
+            f"{feature_set_name}: "
+            f"roc_auc={evaluation['roc_auc']:.4f} "
+            f"brier_score={evaluation['brier_score']:.4f} "
+            f"log_loss={evaluation['log_loss']:.4f} "
+            f"accuracy={evaluation['accuracy']:.4f} "
+            f"f1={evaluation['f1']:.4f}"
+        )
 
     audit = pd.DataFrame(rows)
     if not audit.empty:
@@ -851,7 +876,9 @@ def evaluate_calibrated_feature_audit(
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit.to_csv(audit_path, index=False)
     production = _available_features(
-        TIER_1_FEATURES + (home_feature_columns or HOME_ADVANTAGE_FEATURES) + SEED_DIRECTION_FEATURES,
+        TIER_1_FEATURES
+        + (home_feature_columns or HOME_FEATURE_SET_COLUMNS[PRODUCTION_HOME_FEATURE_SET_NAME])
+        + SEED_DIRECTION_FEATURES,
         training_frame,
     )
     focused_audit = evaluate_focused_elo_carryover_audit(
@@ -1007,12 +1034,12 @@ def _save_elo_carryover_feature_diagnostics(
 def select_production_home_feature_set(home_ablation: pd.DataFrame) -> tuple[str, list[str]]:
     """Choose the best sane home feature design from the home-court ablation."""
     if home_ablation.empty:
-        return PRODUCTION_HOME_FEATURE_SET_NAME, HOME_ADVANTAGE_FEATURES
+        return PRODUCTION_HOME_FEATURE_SET_NAME, HOME_FEATURE_SET_COLUMNS[PRODUCTION_HOME_FEATURE_SET_NAME]
 
     sane_designs = ["only_home_team_A", "home_advantage_diff", "clipped_home_split_features"]
     candidates = home_ablation[home_ablation["home_feature_set"].isin(sane_designs)].copy()
     if candidates.empty:
-        return PRODUCTION_HOME_FEATURE_SET_NAME, HOME_ADVANTAGE_FEATURES
+        return PRODUCTION_HOME_FEATURE_SET_NAME, HOME_FEATURE_SET_COLUMNS[PRODUCTION_HOME_FEATURE_SET_NAME]
 
     winner = candidates.sort_values(["roc_auc", "accuracy", "f1"], ascending=False, na_position="last").iloc[0]
     selected_name = str(winner["home_feature_set"])
@@ -1080,7 +1107,7 @@ def train_production_models(
     """
     home_feature_columns = home_feature_columns or HOME_FEATURE_SET_COLUMNS.get(
         home_feature_set_name,
-        HOME_ADVANTAGE_FEATURES,
+        HOME_FEATURE_SET_COLUMNS[PRODUCTION_HOME_FEATURE_SET_NAME],
     )
     current_feature_columns = TIER_1_FEATURES + home_feature_columns + SEED_DIRECTION_FEATURES
     playoff_feature_columns = list(current_feature_columns)

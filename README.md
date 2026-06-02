@@ -113,7 +113,7 @@ The current hypothetical production model uses the corrected baseline feature se
 - `W_PCT_DIFF`
 - `PLUS_MINUS_DIFF`
 - `PACE_DIFF`
-- selected home-court feature columns, such as `home_team_A` plus `home_advantage_diff` or clipped split features
+- selected home-court feature columns: `home_team_A`, `clipped_home_win_pct_diff`, and `clipped_away_win_pct_diff`
 - `seed_difference`
 - `higher_seed_A`
 
