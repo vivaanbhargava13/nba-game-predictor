@@ -1358,35 +1358,67 @@ def select_features_with_extra_trees(
     return results, best_features
 
 
+def _extract_importance_values(estimator) -> tuple[np.ndarray, str] | None:
+    if estimator is None:
+        return None
+
+    calibrated_classifiers = getattr(estimator, "calibrated_classifiers_", None)
+    if calibrated_classifiers:
+        values = []
+        for calibrated_classifier in calibrated_classifiers:
+            base_estimator = getattr(calibrated_classifier, "estimator", None)
+            if base_estimator is None:
+                base_estimator = getattr(calibrated_classifier, "base_estimator", None)
+            extracted = _extract_importance_values(base_estimator)
+            if extracted is not None:
+                values.append(extracted[0])
+        if values:
+            return (
+                np.mean(np.vstack(values), axis=0),
+                "calibrated_underlying_feature_importances_or_abs_coef",
+            )
+
+    if hasattr(estimator, "named_steps"):
+        steps = estimator.named_steps
+        step = steps.get("classifier")
+        if step is None and steps:
+            step = next(reversed(steps.values()))
+        return _extract_importance_values(step)
+
+    if hasattr(estimator, "feature_importances_"):
+        return np.asarray(estimator.feature_importances_), "feature_importances_or_abs_coef"
+    if hasattr(estimator, "coef_"):
+        return np.abs(np.asarray(estimator.coef_)).ravel(), "feature_importances_or_abs_coef"
+
+    for attribute in ("estimator", "base_estimator"):
+        extracted = _extract_importance_values(getattr(estimator, attribute, None))
+        if extracted is not None:
+            return extracted
+
+    return None
+
+
 def extract_feature_importances(
     pipeline,
     model_name: str,
     feature_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     feature_columns = feature_columns or DIFF_COLUMNS
-    if not hasattr(pipeline, "named_steps"):
-        return pd.DataFrame(
-            columns=["model", "feature", "importance", "importance_type"],
-            data=[[model_name, feature, np.nan, "not_available_for_calibrated_model"] for feature in feature_columns],
-        )
-    classifier = pipeline.named_steps["classifier"]
-    if hasattr(classifier, "feature_importances_"):
-        values = classifier.feature_importances_
-    elif hasattr(classifier, "coef_"):
-        values = np.abs(classifier.coef_).ravel()
-    else:
+    extracted = _extract_importance_values(pipeline)
+    if extracted is None or len(extracted[0]) != len(feature_columns):
         return pd.DataFrame(
             columns=["model", "feature", "importance", "importance_type"],
             data=[[model_name, feature, np.nan, "not_available"] for feature in feature_columns],
         )
 
+    values, importance_type = extracted
     return (
         pd.DataFrame(
             {
                 "model": model_name,
                 "feature": feature_columns,
                 "importance": values,
-                "importance_type": "feature_importances_or_abs_coef",
+                "importance_type": importance_type,
             }
         )
         .sort_values("importance", ascending=False, na_position="last")

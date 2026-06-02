@@ -15,6 +15,7 @@ from app import (
     local_factor_table,
     save_prediction_explanation,
 )
+from src.model import extract_feature_importances
 
 
 class ExplainabilityDirectionTests(unittest.TestCase):
@@ -73,8 +74,8 @@ class ExplainabilityDirectionTests(unittest.TestCase):
 
         self.assertEqual(factors.loc[0, "pushes_toward"], "Team A")
         self.assertEqual(factors.loc[0, "model_delta_direction"], "Team B")
-        self.assertEqual(displayed.loc[0, "pushes_toward"], "NYK")
-        self.assertEqual(displayed.loc[0, "model_delta_direction"], "CLE")
+        self.assertEqual(displayed.loc[0, "favors"], "NYK")
+        self.assertNotIn("model_delta_direction", displayed.columns)
 
     def test_main_factor_table_hides_empty_rows_and_keeps_source_data(self):
         factors = pd.DataFrame(
@@ -174,7 +175,8 @@ class ExplainabilityDirectionTests(unittest.TestCase):
         )
 
         self.assertTrue((factors["signed_contribution"].abs() > 0).any())
-        self.assertTrue((factors["importance"] > 0).any())
+        self.assertTrue((factors["local_effect"].abs() > 0).any())
+        self.assertTrue(factors["global_importance"].eq(0.0).all())
 
     def test_current_hypothetical_excludes_series_context_from_explanations(self):
         factors = pd.DataFrame(
@@ -234,6 +236,35 @@ class ExplainabilityDirectionTests(unittest.TestCase):
         self.assertEqual(filtered_factors["feature"].tolist(), ["OFF_RATING_DIFF"])
 
 
+class CalibratedFeatureImportanceTests(unittest.TestCase):
+    def test_calibrated_rf_explanation_has_multiple_global_important_rows(self):
+        class FakeRandomForest:
+            feature_importances_ = np.array([0.6, 0.3, 0.1])
+
+        class FakePipeline:
+            named_steps = {"classifier": FakeRandomForest()}
+
+        class FakeCalibratedClassifier:
+            estimator = FakePipeline()
+
+        class FakeCalibratedRandomForest:
+            calibrated_classifiers_ = [FakeCalibratedClassifier()]
+
+        importances = extract_feature_importances(
+            FakeCalibratedRandomForest(),
+            "Random Forest",
+            ["pace", "offense", "defense"],
+        )
+
+        self.assertEqual(importances["feature"].tolist(), ["pace", "offense", "defense"])
+        self.assertTrue((importances["importance"] > 0).all())
+        self.assertGreater(len(importances[importances["importance"] > 0]), 1)
+        self.assertEqual(
+            importances["importance_type"].iloc[0],
+            "calibrated_underlying_feature_importances_or_abs_coef",
+        )
+
+
 class NoninformativeFactorFilterTests(unittest.TestCase):
     def test_filter_drops_missing_or_zero_importance_and_contribution(self):
         factors = pd.DataFrame(
@@ -248,6 +279,58 @@ class NoninformativeFactorFilterTests(unittest.TestCase):
         filtered = filter_noninformative_factors(factors)
 
         self.assertEqual(filtered["feature"].tolist(), ["important", "contribution_only"])
+
+    def test_global_important_zero_local_rows_remain(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "important_no_local",
+                    "value": 0.0,
+                    "global_importance": 0.4,
+                    "local_effect": 0.0,
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "zero_both",
+                    "value": 0.0,
+                    "global_importance": 0.0,
+                    "local_effect": 0.0,
+                    "pushes_toward": "Team A",
+                },
+            ]
+        )
+
+        filtered = filter_noninformative_factors(factors)
+
+        self.assertEqual(filtered["feature"].tolist(), ["important_no_local"])
+
+    def test_ui_table_hides_true_zero_zero_rows(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "zero_both",
+                    "value": 0.0,
+                    "global_importance": 0.0,
+                    "local_effect": 0.0,
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "important_no_local",
+                    "value": 0.0,
+                    "global_importance": 0.4,
+                    "local_effect": 0.0,
+                    "pushes_toward": "Team B",
+                },
+            ]
+        )
+
+        displayed = display_factor_table(factors, "NYK", "CLE")
+
+        self.assertEqual(displayed["feature"].tolist(), ["important_no_local"])
+        self.assertEqual(
+            displayed.columns.tolist(),
+            ["feature", "value", "global_importance", "local_effect", "favors"],
+        )
 
     def test_ui_table_filters_noninformative_rows(self):
         factors = pd.DataFrame(

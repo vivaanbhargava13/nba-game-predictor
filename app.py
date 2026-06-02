@@ -463,11 +463,6 @@ def local_factor_table(
         factors["signed_contribution"] = factors["value"] * factors["global_importance"].fillna(0.0)
     factors["local_effect"] = factors["signed_contribution"]
     factors["model_delta_direction"] = factors["signed_contribution"].apply(lambda value: "Team A" if value >= 0 else "Team B")
-    missing_or_zero_importance = factors["importance"].isna() | factors["importance"].eq(0.0)
-    factors.loc[missing_or_zero_importance, "importance"] = factors.loc[
-        missing_or_zero_importance,
-        "signed_contribution",
-    ].abs()
     factors["pushes_toward"] = factors["model_delta_direction"]
     factors["abs_contribution"] = factors["signed_contribution"].abs()
     factors = apply_semantic_factor_direction(factors)
@@ -515,11 +510,12 @@ def filter_noninformative_factors(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     importance_column = "global_importance" if "global_importance" in df.columns else "importance"
-    if importance_column not in df.columns or "signed_contribution" not in df.columns:
+    contribution_column = "local_effect" if "local_effect" in df.columns else "signed_contribution"
+    if importance_column not in df.columns or contribution_column not in df.columns:
         return df.copy()
 
     importance = pd.to_numeric(df[importance_column], errors="coerce")
-    contribution = pd.to_numeric(df["signed_contribution"], errors="coerce")
+    contribution = pd.to_numeric(df[contribution_column], errors="coerce")
     noninformative = (importance.isna() | importance.eq(0.0)) & (
         contribution.isna() | contribution.eq(0.0)
     )
@@ -532,26 +528,25 @@ def display_factor_table(
     team_b_abbreviation: str,
     hide_empty_rows: bool = True,
 ) -> pd.DataFrame:
-    columns = ["feature", "value", "importance", "signed_contribution", "model_delta_direction", "pushes_toward"]
     source = factors.copy()
+    if "global_importance" not in source.columns and "importance" in source.columns:
+        source["global_importance"] = source["importance"]
+    if "local_effect" not in source.columns and "signed_contribution" in source.columns:
+        source["local_effect"] = source["signed_contribution"]
     if hide_empty_rows:
         source = filter_noninformative_factors(source)
+    columns = ["feature", "value", "global_importance", "local_effect", "pushes_toward"]
     view = source.head(10)[[column for column in columns if column in source.columns]].copy()
     direction_labels = {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
     if "pushes_toward" in view.columns:
         view["pushes_toward"] = view["pushes_toward"].replace(direction_labels)
-    if "model_delta_direction" in view.columns:
-        view["model_delta_direction"] = view["model_delta_direction"].replace(direction_labels)
-        if "pushes_toward" not in view.columns or view["model_delta_direction"].eq(view["pushes_toward"]).all():
-            view = view.drop(columns=["model_delta_direction"])
     return view.rename(
         columns={
             "feature": "feature",
             "value": "value",
-            "importance": "importance",
-            "signed_contribution": "signed_contribution",
-            "model_delta_direction": "model_delta_direction",
-            "pushes_toward": "pushes_toward",
+            "global_importance": "global_importance",
+            "local_effect": "local_effect",
+            "pushes_toward": "favors",
         }
     )
 
