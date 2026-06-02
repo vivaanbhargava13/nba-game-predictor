@@ -1,9 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pandas as pd
 
+from src import predictor as predictor_module
 from src.model import (
     PRODUCTION_MODEL_DEFAULTS,
     PRODUCTION_FEATURE_COLUMNS,
@@ -185,6 +188,70 @@ class ModelComparisonTests(unittest.TestCase):
             self.assertFalse(selected_rows.empty)
             self.assertEqual(set(selected_rows["home_feature_set"]), set(selected_rows["selected_home_feature_design"]))
 
+    def test_train_cli_path_uses_production_home_feature_constant(self):
+        training_frame = pd.DataFrame(
+            {
+                "SEASON": ["2021-22", "2022-23", "2023-24", "2024-25"],
+                "TEAM_A_WON": [1, 0, 1, 0],
+            }
+        )
+        selected_features = ["net_rating_diff"]
+        home_ablation = pd.DataFrame(
+            {
+                "home_feature_set": ["home_advantage_diff"],
+                "selected_home_feature_design": ["home_advantage_diff"],
+                "is_selected_production_home_design": [True],
+            }
+        )
+        artifact = {
+            "production_models": {
+                PREDICTION_MODE_CURRENT: {"metrics": {"model": "Current Model"}},
+                PREDICTION_MODE_PLAYOFF: {"metrics": {"model": "Playoff Model"}},
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = SimpleNamespace(
+                start_season="2021-22",
+                end_season="2024-25",
+                cache_dir=Path(tmpdir) / "raw",
+                feature_season_type="Regular Season",
+                processed_dir=Path(tmpdir) / "processed",
+                force_refresh=False,
+                comparison_train_start="2021-22",
+                comparison_train_end="2022-23",
+                comparison_test_start="2023-24",
+                comparison_test_end="2024-25",
+                model_path=Path(tmpdir) / "model.joblib",
+            )
+            with mock.patch.object(predictor_module, "load_training_frame", return_value=training_frame), \
+                mock.patch.object(
+                    predictor_module,
+                    "select_features_with_extra_trees",
+                    return_value=(pd.DataFrame({"features": [",".join(selected_features)]}), selected_features),
+                ), \
+                mock.patch.object(predictor_module, "compare_models_by_season", return_value=pd.DataFrame()), \
+                mock.patch.object(predictor_module, "evaluate_feature_group_ablation", return_value=pd.DataFrame()), \
+                mock.patch.object(
+                    predictor_module,
+                    "evaluate_home_feature_ablation",
+                    return_value=home_ablation,
+                ), \
+                mock.patch.object(
+                    predictor_module,
+                    "evaluate_calibrated_feature_audit",
+                    return_value=pd.DataFrame(),
+                ), \
+                mock.patch.object(predictor_module, "train_production_models", return_value=artifact) as train_mock:
+                predictor_module.command_train(args)
+
+        train_kwargs = train_mock.call_args.kwargs
+        self.assertEqual(train_kwargs["home_feature_set_name"], PRODUCTION_HOME_FEATURE_SET_NAME)
+        self.assertEqual(
+            train_kwargs["home_feature_columns"],
+            ["home_team_A", "clipped_home_win_pct_diff", "clipped_away_win_pct_diff"],
+        )
+
     def test_train_production_models_saves_two_prediction_modes(self):
         rows = []
         seasons = ["2021-22", "2022-23", "2023-24", "2024-25"]
@@ -214,6 +281,11 @@ class ModelComparisonTests(unittest.TestCase):
             saved = load_model(model_path)
             calibration = pd.read_csv(calibration_path)
             self.assertEqual(saved["feature_columns"], PRODUCTION_FEATURE_COLUMNS)
+            self.assertEqual(saved["metadata"]["selected_home_feature_design"], PRODUCTION_HOME_FEATURE_SET_NAME)
+            for feature_columns in [saved["current_hypothetical_features"], saved["playoff_context_features"]]:
+                self.assertIn("clipped_home_win_pct_diff", feature_columns)
+                self.assertIn("clipped_away_win_pct_diff", feature_columns)
+                self.assertNotIn("home_advantage_diff", feature_columns)
             self.assertIn("current_hypothetical_model", saved)
             self.assertIn("playoff_context_model", saved)
             self.assertIn("current_hypothetical_features", saved)

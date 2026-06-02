@@ -14,11 +14,12 @@ from .model import (
     evaluate_home_feature_ablation,
     evaluate_feature_group_ablation,
     get_model_entry_for_mode,
+    HOME_FEATURE_SET_COLUMNS,
     load_model,
     PREDICTION_MODE_CURRENT,
     PREDICTION_MODE_PLAYOFF,
     PRODUCTION_FEATURE_SET_NAME,
-    select_production_home_feature_set,
+    PRODUCTION_HOME_FEATURE_SET_NAME,
     select_features_with_extra_trees,
     train_model,
     train_production_models,
@@ -206,7 +207,8 @@ def command_train(args: argparse.Namespace) -> None:
         )
         print("Home feature ablation:")
         print(home_ablation.to_string(index=False))
-        home_feature_set_name, home_feature_columns = select_production_home_feature_set(home_ablation)
+        home_feature_set_name = PRODUCTION_HOME_FEATURE_SET_NAME
+        home_feature_columns = HOME_FEATURE_SET_COLUMNS[home_feature_set_name]
         calibrated_feature_audit = evaluate_calibrated_feature_audit(
             training_frame=training_frame,
             train_seasons=train_seasons,
