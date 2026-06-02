@@ -470,6 +470,7 @@ def factor_chart(
     team_a_color: str = TEAM_A_COLOR,
     team_b_color: str = TEAM_B_COLOR,
 ):
+    factors = filter_noninformative_factors(factors)
     top_factors = factors.head(10).copy()
     top_factors["direction"] = top_factors["pushes_toward"].map(
         {"Team A": team_a_label, "Team B": team_b_label}
@@ -495,6 +496,20 @@ def factor_chart(
     return fig
 
 
+def filter_noninformative_factors(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    if "importance" not in df.columns or "signed_contribution" not in df.columns:
+        return df.copy()
+
+    importance = pd.to_numeric(df["importance"], errors="coerce")
+    contribution = pd.to_numeric(df["signed_contribution"], errors="coerce")
+    noninformative = (importance.isna() | importance.eq(0.0)) & (
+        contribution.isna() | contribution.eq(0.0)
+    )
+    return df.loc[~noninformative].copy()
+
+
 def display_factor_table(
     factors: pd.DataFrame,
     team_a_abbreviation: str,
@@ -503,10 +518,8 @@ def display_factor_table(
 ) -> pd.DataFrame:
     columns = ["feature", "value", "importance", "signed_contribution", "model_delta_direction", "pushes_toward"]
     source = factors.copy()
-    if hide_empty_rows and {"importance", "signed_contribution"}.issubset(source.columns):
-        importance = pd.to_numeric(source["importance"], errors="coerce").fillna(0.0)
-        contribution = pd.to_numeric(source["signed_contribution"], errors="coerce").fillna(0.0)
-        source = source[~(importance.eq(0.0) & contribution.eq(0.0))].copy()
+    if hide_empty_rows:
+        source = filter_noninformative_factors(source)
     view = source.head(10)[[column for column in columns if column in source.columns]].copy()
     direction_labels = {"Team A": team_a_abbreviation, "Team B": team_b_abbreviation}
     if "pushes_toward" in view.columns:
@@ -2491,7 +2504,7 @@ def build_prediction_context(
         favorite_probability = team_b_probability
 
     margin = abs(team_a_probability - team_b_probability)
-    top_factors = factors.head(10).copy()
+    top_factors = filter_noninformative_factors(factors).head(10).copy()
     favorite_side = "Team A" if favorite_key == "team_a" else "Team B"
     underdog_side = "Team B" if favorite_key == "team_a" else "Team A"
     favorite_factors = top_factors[top_factors["pushes_toward"].eq(favorite_side)].head(5)
@@ -3095,7 +3108,7 @@ def save_prediction_explanation(
         "team_a_probability": team_a_probability,
         "team_b_probability": 1 - team_a_probability,
         "feature_values": json.dumps({key: None if pd.isna(value) else float(value) for key, value in features.items()}),
-        "top_factors": factors.head(10).to_json(orient="records"),
+        "top_factors": filter_noninformative_factors(factors).head(10).to_json(orient="records"),
         "top_importances": importances.head(10).to_json(orient="records"),
     }
     output = pd.DataFrame([row])

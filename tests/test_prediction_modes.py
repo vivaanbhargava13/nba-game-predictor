@@ -350,5 +350,55 @@ def _prediction_context_for_series(
     )
 
 
+class PredictionChatContextFactorTests(unittest.TestCase):
+    def test_chat_context_filters_noninformative_top_factors(self):
+        team_a = pd.Series({"TEAM_NAME": "New York Knicks", "TEAM_ABBREVIATION": "NYK"})
+        team_b = pd.Series({"TEAM_NAME": "Cleveland Cavaliers", "TEAM_ABBREVIATION": "CLE"})
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "drop_me",
+                    "value": 0.0,
+                    "importance": 0.0,
+                    "signed_contribution": 0.0,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "keep_contribution",
+                    "value": 1.0,
+                    "importance": 0.0,
+                    "signed_contribution": -0.08,
+                    "model_delta_direction": "Team B",
+                    "pushes_toward": "Team B",
+                },
+            ]
+        )
+        importances = pd.DataFrame([{"feature": "keep_contribution", "importance": 0.0}])
+
+        context = build_prediction_context(
+            season="2025-26",
+            season_type="Playoffs",
+            prediction_date=pd.to_datetime("2026-05-25").date(),
+            home_team="New York Knicks (NYK)",
+            team_a=team_a,
+            team_b=team_b,
+            team_a_label="New York Knicks (NYK)",
+            team_b_label="Cleveland Cavaliers (CLE)",
+            team_a_display="NYK",
+            team_b_display="CLE",
+            team_a_probability=0.6,
+            features={"keep_contribution": 1.0},
+            factors=factors,
+            importances=importances,
+            model_bundle={"metrics": {"model": "Test"}},
+            feature_columns=["keep_contribution"],
+            team_a_series_probability=None,
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+        )
+
+        self.assertEqual([row["feature"] for row in context["top_factors"]], ["keep_contribution"])
+
+
 if __name__ == "__main__":
     unittest.main()

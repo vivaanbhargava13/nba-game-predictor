@@ -1,9 +1,20 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from app import display_factor_table, filter_explanation_features_for_mode, local_factor_table
+import app
+from app import (
+    display_factor_table,
+    filter_explanation_features_for_mode,
+    filter_noninformative_factors,
+    local_factor_table,
+    save_prediction_explanation,
+)
 
 
 class ExplainabilityDirectionTests(unittest.TestCase):
@@ -221,6 +232,80 @@ class ExplainabilityDirectionTests(unittest.TestCase):
         self.assertNotIn("game_number", filtered_factors["feature"].tolist())
         self.assertNotIn("elimination_game", filtered_factors["feature"].tolist())
         self.assertEqual(filtered_factors["feature"].tolist(), ["OFF_RATING_DIFF"])
+
+
+class NoninformativeFactorFilterTests(unittest.TestCase):
+    def test_filter_drops_missing_or_zero_importance_and_contribution(self):
+        factors = pd.DataFrame(
+            [
+                {"feature": "missing_both", "importance": np.nan, "signed_contribution": np.nan},
+                {"feature": "zero_both", "importance": 0.0, "signed_contribution": 0.0},
+                {"feature": "important", "importance": 0.2, "signed_contribution": 0.0},
+                {"feature": "contribution_only", "importance": 0.0, "signed_contribution": -0.1},
+            ]
+        )
+
+        filtered = filter_noninformative_factors(factors)
+
+        self.assertEqual(filtered["feature"].tolist(), ["important", "contribution_only"])
+
+    def test_ui_table_filters_noninformative_rows(self):
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "zero_both",
+                    "value": 0.0,
+                    "importance": 0.0,
+                    "signed_contribution": 0.0,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "real_factor",
+                    "value": 1.0,
+                    "importance": 0.3,
+                    "signed_contribution": 0.0,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+            ]
+        )
+
+        displayed = display_factor_table(factors, "NYK", "CLE")
+
+        self.assertEqual(displayed["feature"].tolist(), ["real_factor"])
+
+    def test_saved_payload_filters_noninformative_top_factors(self):
+        factors = pd.DataFrame(
+            [
+                {"feature": "drop_me", "importance": 0.0, "signed_contribution": 0.0},
+                {"feature": "keep_me", "importance": 0.0, "signed_contribution": 0.12},
+            ]
+        )
+        importances = pd.DataFrame([{"feature": "keep_me", "importance": 0.0}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            processed_dir = Path(temp_dir)
+            output_path = processed_dir / "prediction_explanations.csv"
+            with patch.object(app, "PROCESSED_DIR", processed_dir), patch.object(
+                app, "PREDICTION_EXPLANATIONS_PATH", output_path
+            ):
+                save_prediction_explanation(
+                    season="2025-26",
+                    prediction_date=pd.to_datetime("2026-05-25").date(),
+                    team_a_label="NYK",
+                    team_b_label="CLE",
+                    home_team="NYK",
+                    team_a_probability=0.6,
+                    features={"OFF_RATING_DIFF": 1.0},
+                    factors=factors,
+                    importances=importances,
+                )
+
+            saved = pd.read_csv(output_path)
+            top_factors = json.loads(saved.loc[0, "top_factors"])
+
+        self.assertEqual([row["feature"] for row in top_factors], ["keep_me"])
 
 
 if __name__ == "__main__":
