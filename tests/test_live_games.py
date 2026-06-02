@@ -714,11 +714,11 @@ class LiveGamesTests(unittest.TestCase):
         self.assertIn("model unavailable", debug)
 
     def test_upcoming_prediction_uses_canonical_alias_inputs(self):
-        captured = {}
+        calls = []
 
         def fake_predictor(**kwargs):
-            captured.update(kwargs)
-            return 0.61, {}, None, None, None
+            calls.append(kwargs)
+            return (0.61 if kwargs["team_a"] == "NYK" else 0.39), {}, None, None, None
 
         game = parse_espn_scoreboard_games(
             _espn_payload(
@@ -738,13 +738,17 @@ class LiveGamesTests(unittest.TestCase):
 
         self.assertIsNone(debug)
         self.assertIn("NYK", prediction)
-        self.assertEqual(captured["team_a"], "NYK")
-        self.assertEqual(captured["team_b"], "CLE")
-        self.assertEqual(captured["home_team"], "team2")
+        self.assertEqual(calls[0]["team_a"], "NYK")
+        self.assertEqual(calls[0]["team_b"], "CLE")
+        self.assertEqual(calls[0]["home_team"], "team2")
+        self.assertEqual(calls[1]["team_a"], "CLE")
+        self.assertEqual(calls[1]["team_b"], "NYK")
+        self.assertEqual(calls[1]["home_team"], "team1")
 
     def test_nyk_at_cle_live_card_probability_matches_main_prediction_helper(self):
         def fake_predictor(**kwargs):
-            return 0.435, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
+            probability = 0.435 if kwargs["team_a"] == "NYK" else 0.565
+            return probability, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
 
         game = _game("401", "NYK", "CLE")
         game.update(
@@ -769,7 +773,8 @@ class LiveGamesTests(unittest.TestCase):
 
     def test_sas_at_okc_live_card_probability_matches_main_prediction_helper(self):
         def fake_predictor(**kwargs):
-            return 0.382, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
+            probability = 0.382 if kwargs["team_a"] == "SAS" else 0.618
+            return probability, {"series_score_diff": kwargs["team_a_series_wins"] - kwargs["team_b_series_wins"]}, None, None, None
 
         game = _game("402", "SAS", "OKC")
         game.update(
@@ -788,6 +793,83 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(card["team_a_probability"], main["team_a_probability"])
         self.assertEqual(card["team_a_series_probability"], main["team_a_series_probability"])
 
+    def test_symmetric_wrapper_makes_reversed_matchups_complementary(self):
+        def fake_predictor(**kwargs):
+            pair_probability = {
+                ("SAS", "NYK"): 0.6365,
+                ("NYK", "SAS"): 0.4142,
+            }
+            return pair_probability[(kwargs["team_a"], kwargs["team_b"])], {}, None, None, None
+
+        sas_first = compute_matchup_prediction(
+            team_a="SAS",
+            team_b="NYK",
+            season="2024-25",
+            prediction_date="2026-06-02",
+            home_team="team2",
+            feature_season_type="Regular Season",
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+            game_number=3,
+            team_a_series_wins=1,
+            team_b_series_wins=1,
+            predictor=fake_predictor,
+        )
+        nyk_first = compute_matchup_prediction(
+            team_a="NYK",
+            team_b="SAS",
+            season="2024-25",
+            prediction_date="2026-06-02",
+            home_team="team1",
+            feature_season_type="Regular Season",
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+            game_number=3,
+            team_a_series_wins=1,
+            team_b_series_wins=1,
+            predictor=fake_predictor,
+        )
+
+        self.assertAlmostEqual(sas_first["team_a_probability"], 1 - nyk_first["team_a_probability"])
+        self.assertAlmostEqual(sas_first["p_symmetric_final"], sas_first["team_a_probability"])
+
+    def test_nyk_sas_home_flip_moves_toward_home_team(self):
+        def fake_predictor(**kwargs):
+            base = 0.61 if kwargs["team_a"] == "SAS" else 0.39
+            if kwargs["home_team"] == "team1":
+                base += 0.05
+            elif kwargs["home_team"] == "team2":
+                base -= 0.05
+            return base, {}, None, None, None
+
+        sas_at_nyk = compute_matchup_prediction(
+            team_a="SAS",
+            team_b="NYK",
+            season="2024-25",
+            prediction_date="2026-06-02",
+            home_team="team2",
+            feature_season_type="Regular Season",
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+            game_number=3,
+            team_a_series_wins=1,
+            team_b_series_wins=1,
+            predictor=fake_predictor,
+        )
+        nyk_at_sas = compute_matchup_prediction(
+            team_a="NYK",
+            team_b="SAS",
+            season="2024-25",
+            prediction_date="2026-06-02",
+            home_team="team2",
+            feature_season_type="Regular Season",
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+            game_number=3,
+            team_a_series_wins=1,
+            team_b_series_wins=1,
+            predictor=fake_predictor,
+        )
+
+        self.assertLess(sas_at_nyk["team_a_probability"], 1 - nyk_at_sas["team_a_probability"])
+        self.assertLess(sas_at_nyk["team_a_series_probability"], 1 - nyk_at_sas["team_a_series_probability"])
+
     def test_espn_live_cache_does_not_store_prediction_probabilities(self):
         game = _game("401", "NYK", "CLE")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -801,7 +883,8 @@ class LiveGamesTests(unittest.TestCase):
 
     def test_playoff_context_upcoming_card_displays_game_probability_only(self):
         def fake_predictor(**kwargs):
-            return 0.435, {}, None, None, None
+            probability = 0.435 if kwargs["team_a"] == "NYK" else 0.565
+            return probability, {}, None, None, None
 
         game = _game("401", "NYK", "CLE")
         game.update(

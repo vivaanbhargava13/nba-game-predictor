@@ -449,14 +449,19 @@ def local_factor_table(
             "value": [features.get(column) for column in feature_columns],
         }
     )
-    factors = values.merge(importances[["feature", "importance"]], on="feature", how="left")
-    factors["importance"] = factors["importance"].fillna(0.0)
+    global_importances = importances[["feature", "importance"]].rename(
+        columns={"importance": "global_importance"}
+    )
+    factors = values.merge(global_importances, on="feature", how="left")
+    factors["global_importance"] = pd.to_numeric(factors["global_importance"], errors="coerce")
+    factors["importance"] = factors["global_importance"]
     factors["value"] = pd.to_numeric(factors["value"], errors="coerce").fillna(0.0)
     if pipeline is not None and full_probability is not None:
         contributions = _feature_probability_contributions(pipeline, features, feature_columns, full_probability)
         factors["signed_contribution"] = factors["feature"].map(contributions).fillna(0.0)
     else:
-        factors["signed_contribution"] = factors["value"] * factors["importance"]
+        factors["signed_contribution"] = factors["value"] * factors["global_importance"].fillna(0.0)
+    factors["local_effect"] = factors["signed_contribution"]
     factors["model_delta_direction"] = factors["signed_contribution"].apply(lambda value: "Team A" if value >= 0 else "Team B")
     missing_or_zero_importance = factors["importance"].isna() | factors["importance"].eq(0.0)
     factors.loc[missing_or_zero_importance, "importance"] = factors.loc[
@@ -466,7 +471,11 @@ def local_factor_table(
     factors["pushes_toward"] = factors["model_delta_direction"]
     factors["abs_contribution"] = factors["signed_contribution"].abs()
     factors = apply_semantic_factor_direction(factors)
-    return factors.sort_values("abs_contribution", ascending=False).reset_index(drop=True)
+    return factors.sort_values(
+        ["global_importance", "abs_contribution"],
+        ascending=[False, False],
+        na_position="last",
+    ).reset_index(drop=True)
 
 
 def factor_chart(
@@ -505,10 +514,11 @@ def factor_chart(
 def filter_noninformative_factors(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
-    if "importance" not in df.columns or "signed_contribution" not in df.columns:
+    importance_column = "global_importance" if "global_importance" in df.columns else "importance"
+    if importance_column not in df.columns or "signed_contribution" not in df.columns:
         return df.copy()
 
-    importance = pd.to_numeric(df["importance"], errors="coerce")
+    importance = pd.to_numeric(df[importance_column], errors="coerce")
     contribution = pd.to_numeric(df["signed_contribution"], errors="coerce")
     noninformative = (importance.isna() | importance.eq(0.0)) & (
         contribution.isna() | contribution.eq(0.0)
@@ -1541,7 +1551,7 @@ def compute_matchup_prediction(
     team_b_series_wins: int = 0,
     predictor=_predict_probability,
 ) -> dict:
-    probability, features, team_a_stats, team_b_stats, home_team_id = predictor(
+    probability_direct, features, team_a_stats, team_b_stats, home_team_id = predictor(
         team_a=team_a,
         team_b=team_b,
         season=season,
@@ -1556,6 +1566,24 @@ def compute_matchup_prediction(
         team_a_series_wins=int(team_a_series_wins),
         team_b_series_wins=int(team_b_series_wins),
     )
+    reverse_home_team = {"team1": "team2", "team2": "team1"}.get(home_team, home_team)
+    probability_reverse, _, _, _, _ = predictor(
+        team_a=team_b,
+        team_b=team_a,
+        season=season,
+        prediction_date=prediction_date,
+        home_team=reverse_home_team,
+        cache_dir=DEFAULT_CACHE_DIR,
+        feature_season_type=feature_season_type,
+        model_path=DEFAULT_MODEL_PATH,
+        debug=False,
+        prediction_context_mode=prediction_context_mode,
+        game_number=int(game_number),
+        team_a_series_wins=int(team_b_series_wins),
+        team_b_series_wins=int(team_a_series_wins),
+    )
+    probability_reverse_complement = 1 - float(probability_reverse)
+    probability = (float(probability_direct) + probability_reverse_complement) / 2
     game_features = game_win_prediction_features(features, prediction_context_mode)
     series_probability = None
     if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
@@ -1567,6 +1595,9 @@ def compute_matchup_prediction(
     return {
         "team_a_probability": float(probability),
         "team_b_probability": float(1 - probability),
+        "p_direct": float(probability_direct),
+        "p_reverse_complement": float(probability_reverse_complement),
+        "p_symmetric_final": float(probability),
         "team_a_series_probability": series_probability,
         "team_b_series_probability": None if series_probability is None else float(1 - series_probability),
         "features": features,
@@ -1904,12 +1935,18 @@ def render_live_games_topbar(live_games: dict, model_available: bool, labels: li
                     "card_prediction_context": json.dumps(live_game_prediction_context(payload), sort_keys=True),
                     "card_game_probability": None,
                     "card_series_probability": None,
+                    "p_direct": None,
+                    "p_reverse_complement": None,
+                    "p_symmetric_final": None,
                     "freshly_computed": False,
                     "reason": debug or "",
                 }
                 if computed:
                     prediction_debug["card_game_probability"] = computed.get("team_a_probability")
                     prediction_debug["card_series_probability"] = computed.get("team_a_series_probability")
+                    prediction_debug["p_direct"] = computed.get("p_direct")
+                    prediction_debug["p_reverse_complement"] = computed.get("p_reverse_complement")
+                    prediction_debug["p_symmetric_final"] = computed.get("p_symmetric_final")
                     prediction_debug["freshly_computed"] = bool(computed.get("freshly_computed"))
                 debug_rows.append(prediction_debug)
                 if debug:
@@ -3377,6 +3414,9 @@ def main() -> None:
                 if home_team_arg == "team1"
                 else f"{team_b['TEAM_ABBREVIATION']} home",
                 "team_A_probability": team_a_probability,
+                "p_direct": prediction_result.get("p_direct"),
+                "p_reverse_complement": prediction_result.get("p_reverse_complement"),
+                "p_symmetric_final": prediction_result.get("p_symmetric_final"),
                 "home_team_A": features.get("home_team_A"),
                 "home_win_pct_diff": features.get("home_win_pct_diff"),
                 "away_win_pct_diff": features.get("away_win_pct_diff"),
@@ -3406,6 +3446,9 @@ def main() -> None:
                     if alternate_home_team_arg == "team1"
                     else f"{team_b['TEAM_ABBREVIATION']} home",
                     "team_A_probability": alternate_probability,
+                    "p_direct": alternate_prediction_result.get("p_direct"),
+                    "p_reverse_complement": alternate_prediction_result.get("p_reverse_complement"),
+                    "p_symmetric_final": alternate_prediction_result.get("p_symmetric_final"),
                     "home_team_A": alternate_features.get("home_team_A"),
                     "home_win_pct_diff": alternate_features.get("home_win_pct_diff"),
                     "away_win_pct_diff": alternate_features.get("away_win_pct_diff"),
