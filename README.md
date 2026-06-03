@@ -231,7 +231,7 @@ Training writes processed data, model comparison outputs, calibration outputs, f
 
 ## Contact
 
-Project Link: [Repository](.)
+Project Link: [Repository](https://github.com/vivaanbhargava13/nba-game-predictor)
 
 [Back to top](#nba-playoff-game-predictor)
 
