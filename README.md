@@ -2,7 +2,7 @@
 
 NBA playoff matchup and series prediction dashboard built for concise, demo-ready model presentation.
 
-[Live Demo](YOUR_STREAMLIT_APP_URL_HERE) · [Repository](.) · [Report Bug](REPORT_BUG_URL_HERE) · [Request Feature](REQUEST_FEATURE_URL_HERE)
+[Live Demo](https://vb-nba-playoff-predictor.streamlit.app/)
 
 ## Table Of Contents
 
@@ -70,7 +70,7 @@ The app presents game win probability, series win probability, prediction explai
 
 The public demo should be deployed on Streamlit Community Cloud:
 
-`YOUR_STREAMLIT_APP_URL_HERE`
+`https://vb-nba-playoff-predictor.streamlit.app/`
 
 After deployment, users can open the hosted app directly without running Streamlit locally.
 
