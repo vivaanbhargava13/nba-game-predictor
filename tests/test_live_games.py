@@ -31,6 +31,7 @@ from app import (
     live_game_render_payloads,
     live_game_selection_state,
     safe_live_games_payload,
+    upcoming_prediction_cache_key,
 )
 
 
@@ -649,6 +650,33 @@ class LiveGamesTests(unittest.TestCase):
 
         self.assertEqual(live_card_key("upcoming", first, 0), "live_card_upcoming_401_0")
         self.assertNotEqual(live_card_key("upcoming", first, 0), live_card_key("upcoming", second, 1))
+
+    def test_upcoming_prediction_cache_key_includes_prediction_inputs(self):
+        base = live_game_payload(_game("401", "NYK", "CLE"))
+        base.update(
+            {
+                "series_status": "NYK leads 3-0",
+                "away_series_wins": 3,
+                "home_series_wins": 0,
+                "game_number": 4,
+            }
+        )
+        base_key = upcoming_prediction_cache_key(base, model_version=(1, 100))
+
+        mutations = [
+            {"season": "2026-27"},
+            {"game_date": "2026-05-26"},
+            {"away_abbr": "BOS"},
+            {"home_abbr": "MIA"},
+            {"game_number": 5, "away_series_wins": 3, "home_series_wins": 1},
+            {"away_series_wins": 2, "home_series_wins": 1},
+        ]
+        for mutation in mutations:
+            changed = dict(base)
+            changed.update(mutation)
+            self.assertNotEqual(base_key, upcoming_prediction_cache_key(changed, model_version=(1, 100)))
+
+        self.assertNotEqual(base_key, upcoming_prediction_cache_key(base, model_version=(2, 100)))
 
     def test_live_game_render_payloads_limit_to_three_per_section(self):
         live_games = {

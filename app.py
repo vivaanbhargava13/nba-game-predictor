@@ -6,6 +6,8 @@ import html
 import queue
 import re
 import threading
+import time
+from contextlib import contextmanager
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -87,22 +89,57 @@ NBA_TEAM_COLORS = {
 }
 
 
+def perf_diagnostics_enabled() -> bool:
+    raw_value = os.getenv("PLAYOFF_PREDICTOR_PERF") or os.getenv("STREAMLIT_PERF") or os.getenv("DEBUG_PERF") or ""
+    return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def perf_timer(phase: str):
+    if not perf_diagnostics_enabled():
+        yield
+        return
+
+    started_at = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        print(f"[perf] {phase}: {elapsed_ms:.1f} ms")
+
+
+def _path_version(path: str | Path) -> tuple[int, int]:
+    try:
+        stat = Path(path).stat()
+        return int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return 0, 0
+
+
+def model_artifact_version(model_path: str | Path = DEFAULT_MODEL_PATH) -> tuple[int, int]:
+    return _path_version(model_path)
+
+
 @st.cache_resource
-def cached_model(model_path: str):
-    return load_model(model_path)
+def cached_model(model_path: str, model_version: tuple[int, int] | None = None):
+    del model_version
+    with perf_timer("model artifact load"):
+        return load_model(model_path)
 
 
 @st.cache_data(show_spinner=False)
 def cached_team_stats(season: str, season_type: str) -> pd.DataFrame:
-    return load_team_stats(season, cache_dir=DEFAULT_CACHE_DIR, season_type=season_type)
+    with perf_timer("processed data load"):
+        return load_team_stats(season, cache_dir=DEFAULT_CACHE_DIR, season_type=season_type)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def cached_live_games() -> dict:
-    return load_live_games()
+    with perf_timer("live/latest/upcoming games fetch"):
+        return load_live_games()
 
 
-def safe_live_games_payload(fetcher=load_live_games, timeout_seconds: float = 1.5) -> dict:
+def safe_live_games_payload(fetcher=cached_live_games, timeout_seconds: float = 1.5) -> dict:
     result_queue: queue.Queue = queue.Queue(maxsize=1)
 
     def fetch_in_background() -> None:
@@ -220,7 +257,7 @@ def load_feature_importances(
 ) -> pd.DataFrame:
     model_name = str(model_bundle.get("metrics", {}).get("model", "Current Model"))
     if FEATURE_IMPORTANCE_PATH.exists():
-        importances = pd.read_csv(FEATURE_IMPORTANCE_PATH)
+        importances = _read_processed_csv(FEATURE_IMPORTANCE_PATH)
         if {"feature", "importance"}.issubset(importances.columns):
             if prediction_context_mode and "prediction_context_mode" in importances.columns:
                 importances = importances[importances["prediction_context_mode"].eq(prediction_context_mode)]
@@ -441,7 +478,7 @@ def apply_semantic_factor_direction(factors: pd.DataFrame) -> pd.DataFrame:
     return adjusted
 
 
-def local_factor_table(
+def _local_factor_table_impl(
     features: dict[str, float],
     importances: pd.DataFrame,
     feature_columns: list[str],
@@ -476,6 +513,11 @@ def local_factor_table(
         ascending=[False, False],
         na_position="last",
     ).reset_index(drop=True)
+
+
+def local_factor_table(*args, **kwargs) -> pd.DataFrame:
+    with perf_timer("explanation factor generation"):
+        return _local_factor_table_impl(*args, **kwargs)
 
 
 def factor_chart(
@@ -1745,10 +1787,17 @@ MODEL_DETAIL_METRICS = [
 ]
 
 
+@st.cache_data(show_spinner=False)
+def _cached_processed_csv(path: str, path_version: tuple[int, int]) -> pd.DataFrame:
+    del path_version
+    with perf_timer(f"processed data load {Path(path).name}"):
+        return pd.read_csv(path)
+
+
 def _read_processed_csv(path: Path) -> pd.DataFrame:
     try:
         if path.exists():
-            return pd.read_csv(path)
+            return _cached_processed_csv(str(path), _path_version(path)).copy()
     except Exception:
         return pd.DataFrame()
     return pd.DataFrame()
@@ -1863,7 +1912,7 @@ def _render_model_metrics_html() -> str:
 def _load_model_detail_importances() -> pd.DataFrame:
     def artifact_importances() -> pd.DataFrame:
         try:
-            model_bundle = load_model(DEFAULT_MODEL_PATH)
+            model_bundle = cached_model(str(DEFAULT_MODEL_PATH), model_artifact_version(DEFAULT_MODEL_PATH))
             feature_columns = all_saved_feature_columns(model_bundle)
             return load_feature_importances(model_bundle, feature_columns, PREDICTION_MODE_CURRENT)
         except Exception:
@@ -2155,6 +2204,119 @@ def live_game_prediction_context(game: dict) -> dict:
     }
 
 
+def _compute_matchup_prediction_impl(
+    *,
+    team_a: str,
+    team_b: str,
+    season: str,
+    prediction_date: str,
+    home_team: str,
+    feature_season_type: str,
+    prediction_context_mode: str,
+    game_number: int = 1,
+    team_a_series_wins: int = 0,
+    team_b_series_wins: int = 0,
+    predictor=_predict_probability,
+) -> dict:
+    with perf_timer("selected matchup prediction"):
+        probability_direct, features, team_a_stats, team_b_stats, home_team_id = predictor(
+            team_a=team_a,
+            team_b=team_b,
+            season=season,
+            prediction_date=prediction_date,
+            home_team=home_team,
+            cache_dir=DEFAULT_CACHE_DIR,
+            feature_season_type=feature_season_type,
+            model_path=DEFAULT_MODEL_PATH,
+            debug=False,
+            prediction_context_mode=prediction_context_mode,
+            game_number=int(game_number),
+            team_a_series_wins=int(team_a_series_wins),
+            team_b_series_wins=int(team_b_series_wins),
+        )
+        reverse_home_team = {"team1": "team2", "team2": "team1"}.get(home_team, home_team)
+        probability_reverse, _, _, _, _ = predictor(
+            team_a=team_b,
+            team_b=team_a,
+            season=season,
+            prediction_date=prediction_date,
+            home_team=reverse_home_team,
+            cache_dir=DEFAULT_CACHE_DIR,
+            feature_season_type=feature_season_type,
+            model_path=DEFAULT_MODEL_PATH,
+            debug=False,
+            prediction_context_mode=prediction_context_mode,
+            game_number=int(game_number),
+            team_a_series_wins=int(team_b_series_wins),
+            team_b_series_wins=int(team_a_series_wins),
+        )
+        probability_reverse_complement = 1 - float(probability_reverse)
+        probability = (float(probability_direct) + probability_reverse_complement) / 2
+        game_features = game_win_prediction_features(features, prediction_context_mode)
+        series_probability = None
+        if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
+            series_probability = simulate_best_of_seven_series_probability(
+                probability,
+                int(team_a_series_wins),
+                int(team_b_series_wins),
+            )
+        return {
+            "team_a_probability": float(probability),
+            "team_b_probability": float(1 - probability),
+            "p_direct": float(probability_direct),
+            "p_reverse_complement": float(probability_reverse_complement),
+            "p_symmetric_final": float(probability),
+            "team_a_series_probability": series_probability,
+            "team_b_series_probability": None if series_probability is None else float(1 - series_probability),
+            "features": features,
+            "game_features": game_features,
+            "team_a_stats": team_a_stats,
+            "team_b_stats": team_b_stats,
+            "home_team_id": home_team_id,
+            "prediction_context": {
+                "season": season,
+                "prediction_date": prediction_date,
+                "home_team": home_team,
+                "feature_season_type": feature_season_type,
+                "prediction_context_mode": prediction_context_mode,
+                "game_number": int(game_number),
+                "team_a_series_wins": int(team_a_series_wins),
+                "team_b_series_wins": int(team_b_series_wins),
+            },
+            "freshly_computed": True,
+        }
+
+
+@st.cache_data(show_spinner=False)
+def _cached_default_matchup_prediction(
+    team_a: str,
+    team_b: str,
+    season: str,
+    prediction_date: str,
+    home_team: str,
+    feature_season_type: str,
+    prediction_context_mode: str,
+    game_number: int,
+    team_a_series_wins: int,
+    team_b_series_wins: int,
+    model_version: tuple[int, int],
+) -> dict:
+    del model_version
+    return _compute_matchup_prediction_impl(
+        team_a=team_a,
+        team_b=team_b,
+        season=season,
+        prediction_date=prediction_date,
+        home_team=home_team,
+        feature_season_type=feature_season_type,
+        prediction_context_mode=prediction_context_mode,
+        game_number=game_number,
+        team_a_series_wins=team_a_series_wins,
+        team_b_series_wins=team_b_series_wins,
+        predictor=_predict_probability,
+    )
+
+
 def compute_matchup_prediction(
     *,
     team_a: str,
@@ -2169,72 +2331,33 @@ def compute_matchup_prediction(
     team_b_series_wins: int = 0,
     predictor=_predict_probability,
 ) -> dict:
-    probability_direct, features, team_a_stats, team_b_stats, home_team_id = predictor(
+    if predictor is _predict_probability:
+        return _cached_default_matchup_prediction(
+            team_a,
+            team_b,
+            season,
+            prediction_date,
+            home_team,
+            feature_season_type,
+            prediction_context_mode,
+            int(game_number),
+            int(team_a_series_wins),
+            int(team_b_series_wins),
+            model_artifact_version(DEFAULT_MODEL_PATH),
+        )
+    return _compute_matchup_prediction_impl(
         team_a=team_a,
         team_b=team_b,
         season=season,
         prediction_date=prediction_date,
         home_team=home_team,
-        cache_dir=DEFAULT_CACHE_DIR,
         feature_season_type=feature_season_type,
-        model_path=DEFAULT_MODEL_PATH,
-        debug=False,
         prediction_context_mode=prediction_context_mode,
-        game_number=int(game_number),
-        team_a_series_wins=int(team_a_series_wins),
-        team_b_series_wins=int(team_b_series_wins),
+        game_number=game_number,
+        team_a_series_wins=team_a_series_wins,
+        team_b_series_wins=team_b_series_wins,
+        predictor=predictor,
     )
-    reverse_home_team = {"team1": "team2", "team2": "team1"}.get(home_team, home_team)
-    probability_reverse, _, _, _, _ = predictor(
-        team_a=team_b,
-        team_b=team_a,
-        season=season,
-        prediction_date=prediction_date,
-        home_team=reverse_home_team,
-        cache_dir=DEFAULT_CACHE_DIR,
-        feature_season_type=feature_season_type,
-        model_path=DEFAULT_MODEL_PATH,
-        debug=False,
-        prediction_context_mode=prediction_context_mode,
-        game_number=int(game_number),
-        team_a_series_wins=int(team_b_series_wins),
-        team_b_series_wins=int(team_a_series_wins),
-    )
-    probability_reverse_complement = 1 - float(probability_reverse)
-    probability = (float(probability_direct) + probability_reverse_complement) / 2
-    game_features = game_win_prediction_features(features, prediction_context_mode)
-    series_probability = None
-    if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
-        series_probability = simulate_best_of_seven_series_probability(
-            probability,
-            int(team_a_series_wins),
-            int(team_b_series_wins),
-        )
-    return {
-        "team_a_probability": float(probability),
-        "team_b_probability": float(1 - probability),
-        "p_direct": float(probability_direct),
-        "p_reverse_complement": float(probability_reverse_complement),
-        "p_symmetric_final": float(probability),
-        "team_a_series_probability": series_probability,
-        "team_b_series_probability": None if series_probability is None else float(1 - series_probability),
-        "features": features,
-        "game_features": game_features,
-        "team_a_stats": team_a_stats,
-        "team_b_stats": team_b_stats,
-        "home_team_id": home_team_id,
-        "prediction_context": {
-            "season": season,
-            "prediction_date": prediction_date,
-            "home_team": home_team,
-            "feature_season_type": feature_season_type,
-            "prediction_context_mode": prediction_context_mode,
-            "game_number": int(game_number),
-            "team_a_series_wins": int(team_a_series_wins),
-            "team_b_series_wins": int(team_b_series_wins),
-        },
-        "freshly_computed": True,
-    }
 
 
 def compute_live_game_prediction(game: dict, model_available: bool, predictor=_predict_probability) -> dict:
@@ -2245,6 +2368,38 @@ def compute_live_game_prediction(game: dict, model_available: bool, predictor=_p
         **context,
         predictor=predictor,
     )
+
+
+def upcoming_prediction_cache_key(
+    game: dict,
+    model_available: bool = True,
+    model_version: tuple[int, int] | None = None,
+) -> tuple:
+    context = live_game_prediction_context(game)
+    return (
+        bool(model_available),
+        str(context.get("season")),
+        str(context.get("prediction_date")),
+        str(context.get("team_a")),
+        str(context.get("team_b")),
+        str(context.get("home_team")),
+        int(context.get("game_number", 1)),
+        int(context.get("team_a_series_wins", 0)),
+        int(context.get("team_b_series_wins", 0)),
+        str(context.get("prediction_context_mode")),
+        str(game.get("game_id") or ""),
+        str(game.get("game_date") or ""),
+        str(game.get("away_abbr") or ""),
+        str(game.get("home_abbr") or ""),
+        model_version if model_version is not None else model_artifact_version(DEFAULT_MODEL_PATH),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_live_card_prediction(game: dict, model_available: bool, cache_key: tuple) -> dict:
+    del cache_key
+    with perf_timer("upcoming card prediction computation"):
+        return compute_live_game_prediction(game, model_available=model_available, predictor=_predict_probability)
 
 
 def _format_matchup_probability_line(
@@ -2271,7 +2426,15 @@ def _upcoming_prediction_result_with_payload(
     away_abbr = str(game.get("away_abbr", ""))
     home_abbr = str(game.get("home_abbr", ""))
     try:
-        result = compute_live_game_prediction(game, model_available=model_available, predictor=predictor)
+        if predictor is _predict_probability:
+            result = _cached_live_card_prediction(
+                game,
+                model_available,
+                upcoming_prediction_cache_key(game, model_available, model_artifact_version(DEFAULT_MODEL_PATH)),
+            )
+        else:
+            with perf_timer("upcoming card prediction computation"):
+                result = compute_live_game_prediction(game, model_available=model_available, predictor=predictor)
     except Exception as exc:
         return "Prediction unavailable", f"{away_abbr} @ {home_abbr}: {exc}", None
 
@@ -3299,7 +3462,7 @@ def markdown_to_basic_html(markdown_text: str) -> str:
     return "".join(html_lines)
 
 
-def build_prediction_context(
+def _build_prediction_context_impl(
     *,
     season: str,
     season_type: str,
@@ -3469,6 +3632,11 @@ def build_prediction_context(
         "model_limitations": CHAT_MODEL_LIMITATIONS,
         "model_metrics": model_bundle.get("metrics", {}),
     }
+
+
+def build_prediction_context(*args, **kwargs) -> dict:
+    with perf_timer("chat context generation"):
+        return _build_prediction_context_impl(*args, **kwargs)
 
 
 def deterministic_initial_explanation(context: dict) -> str:
@@ -3998,7 +4166,7 @@ def main() -> None:
         prediction_date = st.date_input("Prediction date", key="prediction_date")
         st.markdown('<div class="sidebar-compact-separator"></div>', unsafe_allow_html=True)
 
-    model_bundle = cached_model(str(model_path))
+    model_bundle = cached_model(str(model_path), model_artifact_version(model_path))
     saved_feature_columns = all_saved_feature_columns(model_bundle) or model_bundle.get("feature_columns", DIFF_COLUMNS)
     unknown_model_features = [column for column in saved_feature_columns if column not in FEATURE_COLUMNS]
     if unknown_model_features:
