@@ -18,6 +18,7 @@ from app import (
     build_prediction_context,
     compose_initial_explanation,
     context_system_prompt,
+    deterministic_chat_answer,
     deterministic_initial_explanation,
     factor_basketball_sentence,
     game_win_prediction_features,
@@ -357,6 +358,56 @@ def _prediction_context_for_series(
 
 
 class PredictionChatContextFactorTests(unittest.TestCase):
+    def _quality_context(self):
+        team_a = pd.Series({"TEAM_NAME": "New York Knicks", "TEAM_ABBREVIATION": "NYK"})
+        team_b = pd.Series({"TEAM_NAME": "Cleveland Cavaliers", "TEAM_ABBREVIATION": "CLE"})
+        factors = pd.DataFrame(
+            [
+                {
+                    "feature": "PLUS_MINUS_DIFF",
+                    "value": 5.4,
+                    "global_importance": 0.91,
+                    "signed_contribution": 0.12,
+                    "model_delta_direction": "Team A",
+                    "pushes_toward": "Team A",
+                },
+                {
+                    "feature": "OFF_RATING_DIFF",
+                    "value": -1.8,
+                    "global_importance": 0.72,
+                    "signed_contribution": -0.07,
+                    "model_delta_direction": "Team B",
+                    "pushes_toward": "Team B",
+                },
+            ]
+        )
+        importances = pd.DataFrame(
+            [
+                {"feature": "PLUS_MINUS_DIFF", "importance": 0.91},
+                {"feature": "OFF_RATING_DIFF", "importance": 0.72},
+            ]
+        )
+        return build_prediction_context(
+            season="2025-26",
+            season_type="Playoffs",
+            prediction_date=pd.to_datetime("2026-05-25").date(),
+            home_team="New York Knicks (NYK)",
+            team_a=team_a,
+            team_b=team_b,
+            team_a_label="New York Knicks (NYK)",
+            team_b_label="Cleveland Cavaliers (CLE)",
+            team_a_display="NYK",
+            team_b_display="CLE",
+            team_a_probability=0.64,
+            features={"PLUS_MINUS_DIFF": 5.4, "OFF_RATING_DIFF": -1.8},
+            factors=factors,
+            importances=importances,
+            model_bundle={"metrics": {"model": "Test"}},
+            feature_columns=["PLUS_MINUS_DIFF", "OFF_RATING_DIFF"],
+            team_a_series_probability=0.58,
+            prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+        )
+
     def test_chat_context_filters_noninformative_top_factors(self):
         team_a = pd.Series({"TEAM_NAME": "New York Knicks", "TEAM_ABBREVIATION": "NYK"})
         team_b = pd.Series({"TEAM_NAME": "Cleveland Cavaliers", "TEAM_ABBREVIATION": "CLE"})
@@ -404,6 +455,53 @@ class PredictionChatContextFactorTests(unittest.TestCase):
         )
 
         self.assertEqual([row["feature"] for row in context["top_factors"]], ["keep_contribution"])
+
+    def test_chat_context_includes_top_factors_with_friendly_labels(self):
+        context = self._quality_context()
+
+        top_factor = context["top_factors"][0]
+        self.assertEqual(top_factor["raw_feature"], "PLUS_MINUS_DIFF")
+        self.assertEqual(top_factor["friendly_label"], "point differential")
+        self.assertEqual(top_factor["value"], 5.4)
+        self.assertEqual(top_factor["global_importance"], 0.91)
+        self.assertEqual(top_factor["local_effect"], 0.12)
+        self.assertEqual(top_factor["favors"], "New York Knicks (NYK)")
+        self.assertEqual(top_factor["pushes_toward"], "Team A")
+        self.assertIn("outscored", top_factor["short_basketball_meaning"])
+        self.assertIn("injuries", " ".join(context["model_limitations"]))
+
+    def test_chat_prompt_includes_friendly_labels_and_direct_answer_rules(self):
+        prompt = context_system_prompt(self._quality_context())
+
+        self.assertIn('"friendly_label": "point differential"', prompt)
+        self.assertIn('"short_basketball_meaning"', prompt)
+        self.assertIn("Answer the user's exact question first", prompt)
+        self.assertIn("Do not invent injuries, player availability", prompt)
+
+    def test_biggest_advantage_prioritizes_highest_factor_favoring_favorite(self):
+        response = deterministic_chat_answer(self._quality_context(), "What is their biggest advantage?")
+        first_sentence = response.split("\n", 1)[0]
+
+        self.assertIn("point differential", first_sentence)
+        self.assertNotIn("64", first_sentence)
+        self.assertLess(response.find("point differential"), response.find("confidence"))
+
+    def test_chat_does_not_invent_injuries_odds_or_player_news(self):
+        response = deterministic_chat_answer(
+            self._quality_context(),
+            "Is this because of injuries, players, or betting odds?",
+        )
+
+        self.assertIn("does not include injuries", response)
+        self.assertIn("lineup news", response)
+        self.assertNotIn("odds say", response.lower())
+        self.assertNotIn("player news says", response.lower())
+
+    def test_underdog_question_uses_underdog_factor_and_limitations(self):
+        response = deterministic_chat_answer(self._quality_context(), "Why could the underdog win?")
+
+        self.assertIn("Offensive rating", response)
+        self.assertIn("injuries", response)
 
 
 if __name__ == "__main__":

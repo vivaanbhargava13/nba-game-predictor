@@ -2803,6 +2803,76 @@ def other_side(side: str) -> str:
     return "Team B" if side == "Team A" else "Team A"
 
 
+CHAT_FEATURE_LABELS = {
+    "clipped_home_win_pct_diff": "home/away record edge",
+    "clipped_away_win_pct_diff": "road/home split edge",
+    "W_PCT_DIFF": "season win percentage",
+    "PLUS_MINUS_DIFF": "point differential",
+    "NET_RATING_DIFF": "net rating",
+    "OFF_RATING_DIFF": "offensive rating",
+    "DEF_RATING_DIFF": "defensive rating",
+    "PACE_DIFF": "pace",
+    "seed_difference": "seeding",
+    "higher_seed_A": "higher seed",
+}
+
+CHAT_FEATURE_MEANINGS = {
+    "clipped_home_win_pct_diff": "Compares how the home team has performed at home against the opponent's road record.",
+    "clipped_away_win_pct_diff": "Compares how the away team has performed on the road against the opponent's home record.",
+    "W_PCT_DIFF": "Captures the season-long win-rate gap between the teams.",
+    "PLUS_MINUS_DIFF": "Captures how much teams have outscored or been outscored by opponents overall.",
+    "NET_RATING_DIFF": "Measures scoring margin per 100 possessions.",
+    "OFF_RATING_DIFF": "Measures points scored per 100 possessions.",
+    "DEF_RATING_DIFF": "Measures points allowed per 100 possessions; lower is better, but direction comes from model contribution.",
+    "PACE_DIFF": "Measures possessions per game and style tempo.",
+    "seed_difference": "Captures the playoff seeding gap.",
+    "higher_seed_A": "Indicates whether the selected team is the higher seed.",
+}
+
+CHAT_MODEL_LIMITATIONS = [
+    "The model uses the current matchup and model features only.",
+    "It does not include injuries, player availability, lineup news, trades, betting odds, or external reports.",
+    "Top factors explain the model's feature evidence, not a complete basketball scouting report.",
+]
+
+
+def chat_feature_label(feature: str) -> str:
+    return CHAT_FEATURE_LABELS.get(feature, basketball_feature_label(feature))
+
+
+def chat_feature_meaning(feature: str) -> str:
+    return CHAT_FEATURE_MEANINGS.get(
+        feature,
+        f"{chat_feature_label(feature).capitalize()} is one of the model inputs for this matchup.",
+    )
+
+
+def clean_chat_factor(row: dict | pd.Series, context: dict | None = None) -> dict:
+    feature = str(row.get("feature", ""))
+    side = factor_helped_side(row)
+    favors = side
+    if context is not None and side is not None:
+        favors = team_chat_name(context, side)
+    return {
+        "feature": feature,
+        "pushes_toward": side,
+        "signed_contribution": row.get("signed_contribution"),
+        "raw_feature": feature,
+        "friendly_label": chat_feature_label(feature),
+        "value": row.get("value"),
+        "global_importance": row.get("global_importance"),
+        "local_effect": row.get("signed_contribution"),
+        "favors": favors,
+        "short_basketball_meaning": chat_feature_meaning(feature),
+    }
+
+
+def clean_chat_factors(factors: pd.DataFrame, context: dict | None = None) -> list[dict]:
+    if factors is None or factors.empty:
+        return []
+    return [clean_chat_factor(row, context) for row in factors.to_dict(orient="records")]
+
+
 def factor_helped_side(row: dict | pd.Series) -> str | None:
     """Return model-provided direction. Do not infer direction from raw feature signs."""
     side = str(row.get("pushes_toward", "")).strip()
@@ -3145,8 +3215,35 @@ def confidence_answer(context: dict) -> str:
     return f"Reliability is {context['confidence'].lower()}: {favorite} is ahead of {underdog} by {margin:.1f} probability points, and {reason} It still does not account for injuries, lineup changes, or news outside the dataset."
 
 
+def biggest_advantage_answer(context: dict) -> str:
+    favorite_side = "Team A" if context["favorite"]["side"] == "team_a" else "Team B"
+    favorite = side_display(context, favorite_side)
+    top_factor = next(
+        (row for row in context.get("top_factors", []) if factor_helped_side(row) == favorite_side),
+        None,
+    )
+    if top_factor is None:
+        return (
+            f"{favorite}'s biggest model advantage is not identifiable from the current top-factor context.\n"
+            "- The available context has the prediction, margin, and confidence, but no ranked factor that clearly favors the predicted team.\n"
+            "- I should not infer an advantage from raw feature signs without model direction."
+        )
+    label = str(top_factor.get("friendly_label") or chat_feature_label(str(top_factor.get("feature", ""))))
+    meaning = str(top_factor.get("short_basketball_meaning") or chat_feature_meaning(str(top_factor.get("feature", ""))))
+    return "\n".join(
+        [
+            f"{favorite}'s biggest model advantage is {label}.",
+            f"- Model evidence: {meaning}",
+            f"- This is the highest-ranked current factor in the chat context that favors {favorite}.",
+            f"- The model still rates the overall edge as {context['confidence'].lower()} confidence.",
+        ]
+    )
+
+
 def routed_chat_answer(context: dict, user_question: str) -> str | None:
     question = user_question.lower()
+    if any(phrase in question for phrase in ["biggest advantage", "largest advantage", "main advantage", "strongest advantage"]):
+        return biggest_advantage_answer(context)
     if any(word in question for word in ["injury", "injuries", "hurt", "available", "lineup", "trade", "news"]):
         return (
             "The app does not include injuries, lineup news, trades, or current roster context. "
@@ -3249,6 +3346,18 @@ def build_prediction_context(
     underdog_factors = top_factors[top_factors["pushes_toward"].eq(underdog_side)].head(5)
 
     clean_features = {column: None if pd.isna(features.get(column)) else float(features.get(column)) for column in feature_columns}
+    chat_team_context = {
+        "team_a": {
+            "name": str(team_a["TEAM_NAME"]),
+            "abbreviation": str(team_a["TEAM_ABBREVIATION"]),
+            "display": team_a_display,
+        },
+        "team_b": {
+            "name": str(team_b["TEAM_NAME"]),
+            "abbreviation": str(team_b["TEAM_ABBREVIATION"]),
+            "display": team_b_display,
+        },
+    }
     selected_abbr = str(team_a["TEAM_ABBREVIATION"])
     opponent_abbr = str(team_b["TEAM_ABBREVIATION"])
     selected_team_series_wins = int(team_a_series_wins)
@@ -3352,11 +3461,12 @@ def build_prediction_context(
             ),
         },
         "feature_values": clean_features,
-        "top_factors": top_factors.to_dict(orient="records"),
-        "favorite_factors": favorite_factors.to_dict(orient="records"),
-        "underdog_factors": underdog_factors.to_dict(orient="records"),
+        "top_factors": clean_chat_factors(top_factors, chat_team_context),
+        "favorite_factors": clean_chat_factors(favorite_factors, chat_team_context),
+        "underdog_factors": clean_chat_factors(underdog_factors, chat_team_context),
         "home_scenarios": home_debug_rows or [],
         "top_importances": importances.head(10).to_dict(orient="records"),
+        "model_limitations": CHAT_MODEL_LIMITATIONS,
         "model_metrics": model_bundle.get("metrics", {}),
     }
 
@@ -3550,18 +3660,27 @@ def context_system_prompt(context: dict) -> str:
     team_a_name = f"{context['team_a']['name']} ({context['team_a']['abbreviation']})"
     team_b_name = f"{context['team_b']['name']} ({context['team_b']['abbreviation']})"
     return (
-        "You explain an NBA playoff prediction using only the supplied JSON context. "
-        "Do not invent injuries, news, trades, lineups, betting odds, or unavailable facts. "
-        "If the user asks about information that is not in context, say the app does not include that data. "
+        "You are a focused NBA model analyst. Use only the supplied JSON prediction context. "
+        "Answer the user's exact question first in one direct sentence. "
+        "Do not lead with repeated probabilities unless the user asks for the overall prediction, odds, probability, chances, confidence, or who is favored. "
+        "Then add 2-4 short bullets only when they help the answer. "
+        "Keep model evidence separate from limitations, and include one limitations sentence only when relevant. "
+        "Do not invent injuries, player availability, player news, trades, lineups, betting odds, or external facts. "
+        "If the context does not contain enough information, say that directly. "
         f"The returned team_a probability is for {team_a_name}; {team_b_name} probability is 1 minus that value. "
         "In user-visible text, use actual team names or abbreviations and never say Team A or Team B. "
-        "Use concise basketball language. Do not write raw feature values like 'value -3.200' or 'negative edge.' "
+        "Explain model factors in plain basketball language using friendly_label and short_basketball_meaning. "
+        "Avoid vague filler such as 'stronger regular season performance' unless tied to a specific feature. "
+        "Do not write raw feature values like 'value -3.200' or 'negative edge.' "
         "For feature direction, only use each factor's pushes_toward field and signed_contribution; never infer which team a feature helped from the raw feature value. "
+        "For biggest-advantage questions, identify the highest-ranked top factor favoring the predicted team and explain it first. "
+        "For underdog-win questions, identify top factors favoring the underdog plus uncertainty or limitations. "
+        "For injury/player questions, say the model does not include injuries or player availability. "
         "For playoff series context, use series_status_text, selected_team_series_wins, opponent_series_wins, series_leader, and series win probabilities as the source of truth. "
         "Do not infer the series leader from home team, favorite, pushes_toward, or raw feature signs. "
         "series_score_diff is semantic context only: positive means the selected team leads the series, negative means the opponent leads, and zero means tied. "
         "Always distinguish game win probability from series win probability. "
-        "Every answer must directly answer the user's question using this matchup context; do not give generic suggestions for what to ask next. "
+        "Do not give generic suggestions for what to ask next. "
         "For strength-comparison questions, compare probability edge, important model factors, and confidence. "
         "For home-court questions, use home_scenarios when available. "
         "Explain concepts: offensive rating is points scored per 100 possessions; defensive rating is points allowed per 100 possessions and lower is better; net rating is scoring margin per 100 possessions; eFG% adjusts shooting efficiency for threes; TS% includes free throws; pace is possessions per game; Elo is a rolling team-strength rating; seed difference is playoff seeding advantage; home_win_pct_diff is home/away split advantage. "
@@ -3668,9 +3787,10 @@ def deterministic_chat_answer(context: dict, user_question: str) -> str:
     top_lines = factor_lines_for_side(context, favorite_side, limit=3)
     return "\n".join(
         [
-            f"Using the current prediction context, {probability_read(context)}",
-            f"The model favors {favorite_name} by {favorite['margin_pp']:.1f} percentage points with {context['confidence'].lower()} confidence.",
-            "The most relevant model supports are:",
+            f"The current model context points to {favorite_name}, with the answer driven by the matchup factors below.",
+            f"- Probability context: {probability_read(context)}",
+            f"- Model edge: {favorite_name} by {favorite['margin_pp']:.1f} percentage points with {context['confidence'].lower()} confidence.",
+            "- Top model evidence:",
             *[f"- {line}" for line in top_lines[:3]],
         ]
     )
