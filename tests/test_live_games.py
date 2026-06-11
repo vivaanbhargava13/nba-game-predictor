@@ -677,6 +677,18 @@ class LiveGamesTests(unittest.TestCase):
             self.assertNotEqual(base_key, upcoming_prediction_cache_key(changed, model_version=(1, 100)))
 
         self.assertNotEqual(base_key, upcoming_prediction_cache_key(base, model_version=(2, 100)))
+        self.assertNotEqual(
+            upcoming_prediction_cache_key(
+                base,
+                model_version=(1, 100),
+                raw_data_version=(1, ()),
+            ),
+            upcoming_prediction_cache_key(
+                base,
+                model_version=(1, 100),
+                raw_data_version=(2, ()),
+            ),
+        )
 
     def test_live_game_render_payloads_limit_to_three_per_section(self):
         live_games = {

@@ -12,6 +12,7 @@ from app import (
     _cached_processed_csv,
     _compute_matchup_prediction_impl,
     _read_processed_csv,
+    raw_data_cache_version,
 )
 
 
@@ -62,12 +63,78 @@ class AppCachingTests(unittest.TestCase):
         _cached_default_matchup_prediction.clear()
 
         with patch("app._predict_probability", side_effect=fake_predictor):
-            actual = _cached_default_matchup_prediction(**kwargs, model_version=(1, 100))
+            actual = _cached_default_matchup_prediction(
+                **kwargs,
+                model_version=(1, 100),
+                raw_data_version=(1, ()),
+            )
 
         self.assertEqual(actual["team_a_probability"], expected["team_a_probability"])
         self.assertEqual(actual["team_b_probability"], expected["team_b_probability"])
         self.assertEqual(actual["team_a_series_probability"], expected["team_a_series_probability"])
         self.assertEqual(actual["features"], expected["features"])
+
+    def test_selected_prediction_cache_invalidates_when_raw_data_version_changes(self):
+        calls = []
+
+        def fake_predictor(**kwargs):
+            calls.append(kwargs)
+            return 0.6, {"home_team_A": 0.0}, None, None, 5
+
+        kwargs = {
+            "team_a": "NYK",
+            "team_b": "CLE",
+            "season": "2025-26",
+            "prediction_date": "2026-05-25",
+            "home_team": "team2",
+            "feature_season_type": "Regular Season",
+            "prediction_context_mode": PREDICTION_MODE_PLAYOFF,
+            "game_number": 4,
+            "team_a_series_wins": 3,
+            "team_b_series_wins": 0,
+            "model_version": (1, 100),
+        }
+        _cached_default_matchup_prediction.clear()
+
+        with patch("app._predict_probability", side_effect=fake_predictor):
+            first = _cached_default_matchup_prediction(**kwargs, raw_data_version=(1, ()))
+            second = _cached_default_matchup_prediction(**kwargs, raw_data_version=(1, ()))
+            refreshed = _cached_default_matchup_prediction(**kwargs, raw_data_version=(2, ()))
+
+        self.assertEqual(first["team_a_probability"], second["team_a_probability"])
+        self.assertEqual(first["team_a_probability"], refreshed["team_a_probability"])
+        self.assertEqual(len(calls), 4)
+
+    def test_raw_data_version_changes_when_relevant_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            path = cache_dir / "team_base_2025-26_regular_season.csv"
+            path.write_text("value\n1\n")
+            first = raw_data_cache_version("2025-26", "Regular Season", cache_dir, now=100)
+
+            path.write_text("value\n100\n")
+            stat = path.stat()
+            os.utime(path, ns=(stat.st_atime_ns + 1_000_000_000, stat.st_mtime_ns + 1_000_000_000))
+            second = raw_data_cache_version("2025-26", "Regular Season", cache_dir, now=100)
+
+        self.assertNotEqual(first, second)
+
+    def test_current_season_raw_data_version_changes_at_ttl_boundary(self):
+        with patch("app.is_current_nba_season", return_value=True):
+            first = raw_data_cache_version(
+                "2025-26",
+                "Regular Season",
+                cache_dir=Path("/missing"),
+                now=1,
+            )
+            second = raw_data_cache_version(
+                "2025-26",
+                "Regular Season",
+                cache_dir=Path("/missing"),
+                now=1 + 90 * 60,
+            )
+
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

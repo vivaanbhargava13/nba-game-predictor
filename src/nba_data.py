@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 
@@ -12,6 +13,7 @@ from nba_api.stats.static import teams
 
 API_MAX_RETRIES = 3
 API_BASE_DELAY_SECONDS = 0.75
+CURRENT_SEASON_CACHE_TTL_SECONDS = 90 * 60
 
 
 TEAM_STRENGTH_COLUMNS = [
@@ -221,6 +223,20 @@ def season_range(start_season: str, end_season: str) -> list[str]:
     return [f"{year}-{str(year + 1)[-2:]}" for year in range(start_year, end_year + 1)]
 
 
+def nba_season_for_date(value: date | None = None) -> str:
+    current_date = value or date.today()
+    start_year = current_date.year if current_date.month >= 7 else current_date.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def is_current_nba_season(season: str, value: date | None = None) -> bool:
+    return str(season) == nba_season_for_date(value)
+
+
+def raw_cache_ttl_seconds(season: str, value: date | None = None) -> int | None:
+    return CURRENT_SEASON_CACHE_TTL_SECONDS if is_current_nba_season(season, value) else None
+
+
 def _cache_path(cache_dir: Path, name: str, season: str, season_type: str) -> Path:
     safe_type = season_type.lower().replace(" ", "_")
     return cache_dir / f"{name}_{season}_{safe_type}.csv"
@@ -234,8 +250,24 @@ def _nba_date(value: pd.Timestamp | str) -> str:
     return pd.to_datetime(value).strftime("%m/%d/%Y")
 
 
-def _read_or_fetch(path: Path, fetcher, *, allow_failure: bool = False) -> pd.DataFrame:
-    if path.exists():
+def _read_or_fetch(
+    path: Path,
+    fetcher,
+    *,
+    allow_failure: bool = False,
+    max_age_seconds: int | None = None,
+    now: float | None = None,
+) -> pd.DataFrame:
+    cache_exists = path.exists()
+    current_time = time.time() if now is None else float(now)
+    cache_is_fresh = (
+        cache_exists
+        and (
+            max_age_seconds is None
+            or current_time - path.stat().st_mtime <= max_age_seconds
+        )
+    )
+    if cache_is_fresh:
         return pd.read_csv(path)
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +279,9 @@ def _read_or_fetch(path: Path, fetcher, *, allow_failure: bool = False) -> pd.Da
         except Exception as exc:
             last_error = exc
             if attempt == API_MAX_RETRIES:
+                if cache_exists:
+                    print(f"NBA API refresh failed for {path.name}; using stale cache. Error: {exc}")
+                    return pd.read_csv(path)
                 if allow_failure:
                     print(f"NBA API request failed for {path.name}; using empty fallback. Error: {exc}")
                     return pd.DataFrame()
@@ -292,6 +327,7 @@ def load_team_stats(
     cache_dir = Path(cache_dir)
     base_path = _cache_path(cache_dir, "team_base", season, season_type)
     advanced_path = _cache_path(cache_dir, "team_advanced", season, season_type)
+    cache_ttl = raw_cache_ttl_seconds(season)
 
     def fetch_base() -> pd.DataFrame:
         response = leaguedashteamstats.LeagueDashTeamStats(
@@ -309,8 +345,8 @@ def load_team_stats(
         )
         return response.get_data_frames()[0]
 
-    base = _read_or_fetch(base_path, fetch_base)
-    advanced = _read_or_fetch(advanced_path, fetch_advanced)
+    base = _read_or_fetch(base_path, fetch_base, max_age_seconds=cache_ttl)
+    advanced = _read_or_fetch(advanced_path, fetch_advanced, max_age_seconds=cache_ttl)
 
     merged = advanced.merge(
         base[["TEAM_ID", "W_PCT", "PLUS_MINUS"]],
@@ -368,6 +404,7 @@ def load_team_game_log(
     """Load one team's TeamGameLog rows for a season and season type."""
     cache_dir = Path(cache_dir)
     path = cache_dir / f"team_game_log_{season}_{season_type.lower().replace(' ', '_')}_{team_id}.csv"
+    cache_ttl = raw_cache_ttl_seconds(season)
 
     def fetch_games() -> pd.DataFrame:
         response = teamgamelog.TeamGameLog(
@@ -377,7 +414,7 @@ def load_team_game_log(
         )
         return response.get_data_frames()[0]
 
-    games = _read_or_fetch(path, fetch_games)
+    games = _read_or_fetch(path, fetch_games, max_age_seconds=cache_ttl)
     if games.empty:
         return games
 

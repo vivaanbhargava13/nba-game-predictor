@@ -30,7 +30,12 @@ from src.model import (
     get_model_entry_for_mode,
     load_model,
 )
-from src.nba_data import FEATURE_COLUMNS, load_team_stats
+from src.nba_data import (
+    CURRENT_SEASON_CACHE_TTL_SECONDS,
+    FEATURE_COLUMNS,
+    is_current_nba_season,
+    load_team_stats,
+)
 from src.live_games import load_live_games, nba_season_from_date
 from src.predictor import DEFAULT_CACHE_DIR, DEFAULT_MODEL_PATH, _predict_probability, validate_series_score
 
@@ -120,6 +125,32 @@ def model_artifact_version(model_path: str | Path = DEFAULT_MODEL_PATH) -> tuple
     return _path_version(model_path)
 
 
+def raw_data_cache_version(
+    season: str,
+    season_type: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    now: float | None = None,
+) -> tuple:
+    cache_dir = Path(cache_dir)
+    safe_type = str(season_type).lower().replace(" ", "_")
+    paths = [
+        cache_dir / f"team_base_{season}_{safe_type}.csv",
+        cache_dir / f"team_advanced_{season}_{safe_type}.csv",
+        cache_dir / f"team_seeds_{season}.csv",
+        *cache_dir.glob(f"team_game_log_{season}_{safe_type}_*.csv"),
+    ]
+    file_versions = tuple(
+        (path.name, *_path_version(path))
+        for path in sorted(set(paths), key=lambda item: item.name)
+        if path.exists()
+    )
+    freshness_bucket = 0
+    if is_current_nba_season(season):
+        current_time = time.time() if now is None else float(now)
+        freshness_bucket = int(current_time // CURRENT_SEASON_CACHE_TTL_SECONDS)
+    return freshness_bucket, file_versions
+
+
 @st.cache_resource
 def cached_model(model_path: str, model_version: tuple[int, int] | None = None):
     del model_version
@@ -128,7 +159,8 @@ def cached_model(model_path: str, model_version: tuple[int, int] | None = None):
 
 
 @st.cache_data(show_spinner=False)
-def cached_team_stats(season: str, season_type: str) -> pd.DataFrame:
+def cached_team_stats(season: str, season_type: str, raw_data_version: tuple | None = None) -> pd.DataFrame:
+    del raw_data_version
     with perf_timer("processed data load"):
         return load_team_stats(season, cache_dir=DEFAULT_CACHE_DIR, season_type=season_type)
 
@@ -2300,8 +2332,9 @@ def _cached_default_matchup_prediction(
     team_a_series_wins: int,
     team_b_series_wins: int,
     model_version: tuple[int, int],
+    raw_data_version: tuple,
 ) -> dict:
-    del model_version
+    del model_version, raw_data_version
     return _compute_matchup_prediction_impl(
         team_a=team_a,
         team_b=team_b,
@@ -2344,6 +2377,7 @@ def compute_matchup_prediction(
             int(team_a_series_wins),
             int(team_b_series_wins),
             model_artifact_version(DEFAULT_MODEL_PATH),
+            raw_data_cache_version(season, feature_season_type),
         )
     return _compute_matchup_prediction_impl(
         team_a=team_a,
@@ -2374,6 +2408,7 @@ def upcoming_prediction_cache_key(
     game: dict,
     model_available: bool = True,
     model_version: tuple[int, int] | None = None,
+    raw_data_version: tuple | None = None,
 ) -> tuple:
     context = live_game_prediction_context(game)
     return (
@@ -2392,6 +2427,9 @@ def upcoming_prediction_cache_key(
         str(game.get("away_abbr") or ""),
         str(game.get("home_abbr") or ""),
         model_version if model_version is not None else model_artifact_version(DEFAULT_MODEL_PATH),
+        raw_data_version
+        if raw_data_version is not None
+        else raw_data_cache_version(str(context.get("season")), str(context.get("feature_season_type"))),
     )
 
 
@@ -4175,7 +4213,11 @@ def main() -> None:
         st.stop()
 
     try:
-        team_stats = cached_team_stats(season, season_type)
+        team_stats = cached_team_stats(
+            season,
+            season_type,
+            raw_data_cache_version(season, season_type),
+        )
     except Exception as exc:
         st.error(f"Could not load NBA stats: {exc}")
         st.stop()
