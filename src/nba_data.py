@@ -508,6 +508,7 @@ def load_playoff_games(
     """Load playoff game logs for one season."""
     cache_dir = Path(cache_dir)
     path = _cache_path(cache_dir, "playoff_games", season, "Playoffs")
+    cache_ttl = raw_cache_ttl_seconds(season)
 
     def fetch_games() -> pd.DataFrame:
         response = leaguegamelog.LeagueGameLog(
@@ -517,7 +518,7 @@ def load_playoff_games(
         )
         return response.get_data_frames()[0]
 
-    games = _read_or_fetch(path, fetch_games)
+    games = _read_or_fetch(path, fetch_games, max_age_seconds=cache_ttl)
     if games.empty:
         return games
 

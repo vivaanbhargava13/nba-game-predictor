@@ -38,6 +38,12 @@ from src.nba_data import (
 )
 from src.live_games import load_live_games, nba_season_from_date
 from src.predictor import DEFAULT_CACHE_DIR, DEFAULT_MODEL_PATH, _predict_probability, validate_series_score
+from src.series_context import (
+    DEFAULT_SERIES_CONTEXT_MODEL_PATH,
+    apply_series_context_probability,
+    resolve_completed_game_pregame_state_for_card,
+    resolve_pregame_series_state_for_card,
+)
 
 
 SEASON_OPTIONS = [f"{year}-{str(year + 1)[-2:]}" for year in range(2025, 2014, -1)]
@@ -137,6 +143,7 @@ def raw_data_cache_version(
         cache_dir / f"team_base_{season}_{safe_type}.csv",
         cache_dir / f"team_advanced_{season}_{safe_type}.csv",
         cache_dir / f"team_seeds_{season}.csv",
+        cache_dir / f"playoff_games_{season}_playoffs.csv",
         *cache_dir.glob(f"team_game_log_{season}_{safe_type}_*.csv"),
     ]
     file_versions = tuple(
@@ -1368,6 +1375,11 @@ def inject_dashboard_css() -> None:
                 font-size: 0.78rem;
                 margin-top: 0.42rem;
             }}
+            .live-game-footnote {{
+                color: var(--muted);
+                font-size: 0.66rem;
+                margin-top: 0.24rem;
+            }}
             .live-game-card strong {{
                 color: var(--ink);
                 font-weight: 950;
@@ -2156,6 +2168,9 @@ def _derived_series_status(game: dict, away_abbr: str, home_abbr: str) -> str:
 
 
 def _live_series_status_text(game: dict) -> str:
+    resolved_status = str(game.get("resolved_series_score_text") or "").strip()
+    if resolved_status and bool(game.get("context_available", True)):
+        return resolved_status
     away_status_wins = game.get("away_series_wins")
     home_status_wins = game.get("home_series_wins")
     if away_status_wins is not None and home_status_wins is not None:
@@ -2178,12 +2193,64 @@ def _live_series_status_text(game: dict) -> str:
 
 
 def live_game_context_lines(game: dict) -> list[str]:
-    lines: list[str] = []
+    if str(game.get("card_status") or "") == "completed":
+        displayed_status = str(
+            game.get("displayed_series_state")
+            or game.get("current_series_status")
+            or game.get("series_status")
+            or ""
+        ).strip()
+        if not displayed_status:
+            return []
+        lead_match = re.fullmatch(
+            r"([A-Z]{2,4}) leads(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
+            displayed_status,
+            re.IGNORECASE,
+        )
+        if lead_match:
+            displayed_status = (
+                f"{lead_match.group(1).upper()} leads series "
+                f"{lead_match.group(2)}-{lead_match.group(3)}"
+            )
+        return [displayed_status]
+
     series_status = _live_series_status_text(game)
-    if series_status:
-        lines.append(series_status)
+    if bool(game.get("conditional_context")) and series_status:
+        tied_match = re.fullmatch(r"Series tied (\d+)\s*[-–]\s*(\d+)", series_status, re.IGNORECASE)
+        lead_match = re.fullmatch(
+            r"([A-Z]{2,4}) leads(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
+            series_status,
+            re.IGNORECASE,
+        )
+        if tied_match:
+            compact_status = f"Series would be tied {tied_match.group(1)}-{tied_match.group(2)}*"
+        elif lead_match:
+            compact_status = (
+                f"{lead_match.group(1).upper()} would lead "
+                f"{lead_match.group(2)}-{lead_match.group(3)}*"
+            )
+        else:
+            compact_status = f"Would be {series_status}*"
+        return ["IF NECESSARY", compact_status, "*conditional path"]
+
+    lines: list[str] = []
     if bool(game.get("if_necessary")):
         lines.append("IF NECESSARY")
+    if series_status:
+        lead_match = re.fullmatch(
+            r"([A-Z]{2,4}) leads(?:\s+(?:the\s+)?series)?\s+(\d+)\s*[-–]\s*(\d+)",
+            series_status,
+            re.IGNORECASE,
+        )
+        if lead_match:
+            series_status = (
+                f"{lead_match.group(1).upper()} leads series "
+                f"{lead_match.group(2)}-{lead_match.group(3)}"
+            )
+        lines.append(series_status)
+    context_note = str(game.get("context_note") or "").strip()
+    if not bool(game.get("context_available", True)) and context_note:
+        lines.append(context_note)
     return lines
 
 
@@ -2199,40 +2266,55 @@ def _plain_score_text(game: dict) -> str:
 
 def live_game_prediction_context(game: dict) -> dict:
     game_date = live_game_date(game)
-    away_series_wins = game.get("away_series_wins")
-    home_series_wins = game.get("home_series_wins")
+    payload = live_game_payload(game)
+    away_series_wins = payload.get("resolved_team_a_series_wins")
+    home_series_wins = payload.get("resolved_team_b_series_wins")
     has_series_context = (
-        bool(game.get("series_status"))
-        or bool(game.get("round"))
-        or bool(game.get("series_label"))
-        or bool(game.get("if_necessary"))
-        or game.get("game_number") is not None
+        bool(payload.get("series_status"))
+        or bool(payload.get("round"))
+        or bool(payload.get("series_label"))
+        or bool(payload.get("if_necessary"))
+        or payload.get("scheduled_game_number") is not None
         or away_series_wins is not None
         or home_series_wins is not None
     )
-    game_number = int(game.get("game_number") or 1)
+    context_available = bool(payload.get("context_available", has_series_context))
+    game_number = int(payload.get("resolved_game_number") or payload.get("game_number") or 1)
     game_number = min(7, max(1, game_number))
     team_a_series_wins = int(away_series_wins or 0)
     team_b_series_wins = int(home_series_wins or 0)
-    if game_number == 7:
-        team_a_series_wins = 3
-        team_b_series_wins = 3
-    elif has_series_context:
-        expected_total = game_number - 1
-        if team_a_series_wins + team_b_series_wins != expected_total:
-            team_b_series_wins = max(0, expected_total - team_a_series_wins)
+    prediction_mode = PREDICTION_MODE_PLAYOFF if has_series_context and context_available else PREDICTION_MODE_CURRENT
+    if prediction_mode == PREDICTION_MODE_CURRENT:
+        game_number = 1
+        team_a_series_wins = 0
+        team_b_series_wins = 0
 
     return {
-        "team_a": str(game.get("away_abbr") or ""),
-        "team_b": str(game.get("home_abbr") or ""),
-        "season": str(game.get("season") or nba_season_from_date(game_date)),
+        "team_a": str(payload.get("away_abbr") or ""),
+        "team_b": str(payload.get("home_abbr") or ""),
+        "season": str(payload.get("season") or nba_season_from_date(game_date)),
         "prediction_date": game_date.isoformat(),
         "home_team": "team2",
         "feature_season_type": DEFAULT_SEASON_TYPE,
-        "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
+        "prediction_context_mode": prediction_mode,
         "game_number": game_number,
         "team_a_series_wins": team_a_series_wins,
         "team_b_series_wins": team_b_series_wins,
+        "series_context_metadata": {
+            "conditional_context": bool(payload.get("conditional_context")),
+            "context_available": context_available,
+            "assumed_prior_winners": list(payload.get("assumed_prior_winners") or []),
+            "previous_game_winner": payload.get("previous_game_winner"),
+            "previous_game_winner_side": payload.get("previous_game_winner_side"),
+            "previous_game_margin": payload.get("previous_game_margin"),
+            "context_note": str(payload.get("context_note") or ""),
+            "resolved_series_score_text": str(payload.get("resolved_series_score_text") or ""),
+            "card_status": str(payload.get("card_status") or ""),
+            "completed_game_replay": bool(payload.get("completed_game_replay")),
+            "final_score_text": str(payload.get("final_score") or ""),
+            "pregame_series_state": str(payload.get("pregame_series_state") or ""),
+            "postgame_series_state": str(payload.get("postgame_series_state") or ""),
+        },
     }
 
 
@@ -2248,6 +2330,7 @@ def _compute_matchup_prediction_impl(
     game_number: int = 1,
     team_a_series_wins: int = 0,
     team_b_series_wins: int = 0,
+    series_context_metadata: dict | None = None,
     predictor=_predict_probability,
 ) -> dict:
     with perf_timer("selected matchup prediction"):
@@ -2283,7 +2366,39 @@ def _compute_matchup_prediction_impl(
             team_b_series_wins=int(team_a_series_wins),
         )
         probability_reverse_complement = 1 - float(probability_reverse)
-        probability = (float(probability_direct) + probability_reverse_complement) / 2
+        base_probability = (float(probability_direct) + probability_reverse_complement) / 2
+        probability = base_probability
+        series_context_result = {
+            "probability": base_probability,
+            "base_probability": base_probability,
+            "context_probability": None,
+            "applied": False,
+            "note": None,
+            "features": None,
+        }
+        if (
+            prediction_context_mode == PREDICTION_MODE_PLAYOFF
+            and predictor is _predict_probability
+            and team_a_stats is not None
+            and team_b_stats is not None
+        ):
+            series_context_result = apply_series_context_probability(
+                base_probability=base_probability,
+                season=season,
+                team_a_id=int(team_a_stats.name),
+                team_b_id=int(team_b_stats.name),
+                prediction_date=prediction_date,
+                home_team_id=int(home_team_id),
+                game_number=int(game_number),
+                team_a_series_wins=int(team_a_series_wins),
+                team_b_series_wins=int(team_b_series_wins),
+                cache_dir=DEFAULT_CACHE_DIR,
+                model_path=DEFAULT_SERIES_CONTEXT_MODEL_PATH,
+                team_a_abbr=team_a,
+                team_b_abbr=team_b,
+                resolved_context=series_context_metadata,
+            )
+            probability = float(series_context_result["probability"])
         game_features = game_win_prediction_features(features, prediction_context_mode)
         series_probability = None
         if prediction_context_mode == PREDICTION_MODE_PLAYOFF:
@@ -2298,6 +2413,11 @@ def _compute_matchup_prediction_impl(
             "p_direct": float(probability_direct),
             "p_reverse_complement": float(probability_reverse_complement),
             "p_symmetric_final": float(probability),
+            "base_team_a_probability": float(base_probability),
+            "series_context_probability": series_context_result["context_probability"],
+            "series_context_applied": bool(series_context_result["applied"]),
+            "series_context_note": series_context_result["note"],
+            "series_context_features": series_context_result["features"],
             "team_a_series_probability": series_probability,
             "team_b_series_probability": None if series_probability is None else float(1 - series_probability),
             "features": features,
@@ -2314,6 +2434,7 @@ def _compute_matchup_prediction_impl(
                 "game_number": int(game_number),
                 "team_a_series_wins": int(team_a_series_wins),
                 "team_b_series_wins": int(team_b_series_wins),
+                "series_context_metadata": series_context_metadata or {},
             },
             "freshly_computed": True,
         }
@@ -2333,8 +2454,10 @@ def _cached_default_matchup_prediction(
     team_b_series_wins: int,
     model_version: tuple[int, int],
     raw_data_version: tuple,
+    series_context_model_version: tuple[int, int],
+    series_context_metadata: dict | None = None,
 ) -> dict:
-    del model_version, raw_data_version
+    del model_version, raw_data_version, series_context_model_version
     return _compute_matchup_prediction_impl(
         team_a=team_a,
         team_b=team_b,
@@ -2346,6 +2469,7 @@ def _cached_default_matchup_prediction(
         game_number=game_number,
         team_a_series_wins=team_a_series_wins,
         team_b_series_wins=team_b_series_wins,
+        series_context_metadata=series_context_metadata or {},
         predictor=_predict_probability,
     )
 
@@ -2362,6 +2486,7 @@ def compute_matchup_prediction(
     game_number: int = 1,
     team_a_series_wins: int = 0,
     team_b_series_wins: int = 0,
+    series_context_metadata: dict | None = None,
     predictor=_predict_probability,
 ) -> dict:
     if predictor is _predict_probability:
@@ -2378,6 +2503,8 @@ def compute_matchup_prediction(
             int(team_b_series_wins),
             model_artifact_version(DEFAULT_MODEL_PATH),
             raw_data_cache_version(season, feature_season_type),
+            _path_version(DEFAULT_SERIES_CONTEXT_MODEL_PATH),
+            series_context_metadata or {},
         )
     return _compute_matchup_prediction_impl(
         team_a=team_a,
@@ -2390,6 +2517,7 @@ def compute_matchup_prediction(
         game_number=game_number,
         team_a_series_wins=team_a_series_wins,
         team_b_series_wins=team_b_series_wins,
+        series_context_metadata=series_context_metadata,
         predictor=predictor,
     )
 
@@ -2409,6 +2537,7 @@ def upcoming_prediction_cache_key(
     model_available: bool = True,
     model_version: tuple[int, int] | None = None,
     raw_data_version: tuple | None = None,
+    series_context_model_version: tuple[int, int] | None = None,
 ) -> tuple:
     context = live_game_prediction_context(game)
     return (
@@ -2422,14 +2551,25 @@ def upcoming_prediction_cache_key(
         int(context.get("team_a_series_wins", 0)),
         int(context.get("team_b_series_wins", 0)),
         str(context.get("prediction_context_mode")),
+        bool((context.get("series_context_metadata") or {}).get("conditional_context")),
+        tuple((context.get("series_context_metadata") or {}).get("assumed_prior_winners") or []),
         str(game.get("game_id") or ""),
         str(game.get("game_date") or ""),
         str(game.get("away_abbr") or ""),
         str(game.get("home_abbr") or ""),
+        _int_or_none(game.get("game_number")),
+        _int_or_none(game.get("scheduled_game_number")),
+        _int_or_none(game.get("away_series_wins")),
+        _int_or_none(game.get("home_series_wins")),
+        bool(game.get("conditional_context")),
+        tuple(game.get("assumed_prior_winners") or []),
         model_version if model_version is not None else model_artifact_version(DEFAULT_MODEL_PATH),
         raw_data_version
         if raw_data_version is not None
         else raw_data_cache_version(str(context.get("season")), str(context.get("feature_season_type"))),
+        series_context_model_version
+        if series_context_model_version is not None
+        else _path_version(DEFAULT_SERIES_CONTEXT_MODEL_PATH),
     )
 
 
@@ -2511,7 +2651,8 @@ def _plain_upcoming_prediction(prediction_html: str) -> str:
 
 
 def _latest_game_card_html(game: dict) -> str:
-    context = "".join(f'<div class="live-game-note">{html.escape(line)}</div>' for line in live_game_context_lines(game))
+    context = _live_game_context_html(game)
+    footnote = _live_game_footnote_html(game)
     return (
         '<div class="live-game-card">'
         f'<div class="live-game-teams">{_team_gradient_span(game.get("away_abbr", ""))}'
@@ -2519,12 +2660,14 @@ def _latest_game_card_html(game: dict) -> str:
         f'<div class="live-game-date">{html.escape(str(game.get("time_label") or game.get("date_label") or ""))}</div>'
         f"{context}"
         f'<div class="live-game-score">{_score_text(game)}</div>'
+        f"{footnote}"
         "</div>"
     )
 
 
 def _upcoming_game_card_html_from_prediction(game: dict, prediction_html: str) -> str:
-    context = "".join(f'<div class="live-game-note">{html.escape(line)}</div>' for line in live_game_context_lines(game))
+    context = _live_game_context_html(game)
+    footnote = _live_game_footnote_html(game)
     return (
         '<div class="live-game-card">'
         f'<div class="live-game-teams">{_team_gradient_span(game.get("away_abbr", ""))}'
@@ -2532,7 +2675,24 @@ def _upcoming_game_card_html_from_prediction(game: dict, prediction_html: str) -
         f'<div class="live-game-date">{html.escape(str(game.get("time_label") or game.get("date_label") or ""))}</div>'
         f"{context}"
         f'<div class="live-game-prediction">{prediction_html}</div>'
+        f"{footnote}"
         "</div>"
+    )
+
+
+def _live_game_context_html(game: dict) -> str:
+    return "".join(
+        f'<div class="live-game-note">{html.escape(line)}</div>'
+        for line in live_game_context_lines(game)
+        if not line.startswith("*")
+    )
+
+
+def _live_game_footnote_html(game: dict) -> str:
+    return "".join(
+        f'<div class="live-game-footnote">{html.escape(line)}</div>'
+        for line in live_game_context_lines(game)
+        if line.startswith("*")
     )
 
 
@@ -2587,6 +2747,7 @@ def live_game_date(game: dict) -> date:
 
 
 def live_game_selection_state(game: dict, labels: list[str]) -> dict:
+    game = live_game_payload(game)
     away_abbr = str(game.get("away_abbr") or "")
     home_abbr = str(game.get("home_abbr") or "")
     away_label = team_label_for_abbr(labels, away_abbr)
@@ -2596,24 +2757,27 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
     if season not in SEASON_OPTIONS:
         season = DEFAULT_SEASON
 
-    away_series_wins = game.get("away_series_wins")
-    home_series_wins = game.get("home_series_wins")
+    away_series_wins = game.get("resolved_team_a_series_wins")
+    home_series_wins = game.get("resolved_team_b_series_wins")
     has_series_context = (
         bool(game.get("series_status"))
         or bool(game.get("round"))
         or bool(game.get("series_label"))
         or bool(game.get("if_necessary"))
-        or game.get("game_number") is not None
+        or game.get("scheduled_game_number") is not None
         or away_series_wins is not None
         or home_series_wins is not None
     )
-    game_number = int(game.get("game_number") or 1)
+    context_available = bool(game.get("context_available", has_series_context))
+    game_number = int(game.get("resolved_game_number") or game.get("game_number") or 1)
     game_number = min(7, max(1, game_number))
     team_a_series_wins = int(away_series_wins or 0)
     team_b_series_wins = int(home_series_wins or 0)
-    if game_number != 7:
-        team_a_series_wins = min(team_a_series_wins, max(0, game_number - 1))
-        team_b_series_wins = min(team_b_series_wins, max(0, game_number - 1))
+    prediction_mode = PREDICTION_MODE_PLAYOFF if has_series_context and context_available else PREDICTION_MODE_CURRENT
+    if prediction_mode == PREDICTION_MODE_CURRENT:
+        game_number = 1
+        team_a_series_wins = 0
+        team_b_series_wins = 0
 
     return {
         "selected_team_label": away_label,
@@ -2622,50 +2786,190 @@ def live_game_selection_state(game: dict, labels: list[str]) -> dict:
         "prediction_date": game_date,
         "season": season,
         "season_type": DEFAULT_SEASON_TYPE,
-        "prediction_context_mode": PREDICTION_MODE_PLAYOFF if has_series_context else PREDICTION_MODE_CURRENT,
+        "prediction_context_mode": prediction_mode,
         "game_number": game_number,
         "team_a_series_wins": team_a_series_wins,
         "team_b_series_wins": team_b_series_wins,
-        "raw_live_game_series_label": str(game.get("series_status") or ""),
+        "raw_live_game_series_label": str(game.get("current_series_status") or game.get("series_status") or ""),
+        "conditional_context": bool(game.get("conditional_context")),
+        "series_context_available": context_available,
+        "assumed_prior_winners": list(game.get("assumed_prior_winners") or []),
+        "previous_game_winner": game.get("previous_game_winner"),
+        "previous_game_margin": game.get("previous_game_margin"),
+        "resolved_series_score_text": str(game.get("resolved_series_score_text") or ""),
+        "live_card_context_note": str(game.get("context_note") or ""),
+        "live_card_status": str(game.get("card_status") or ""),
+        "completed_game_replay": bool(game.get("completed_game_replay")),
+        "final_score_text": str(game.get("final_score") or ""),
+        "pregame_series_state": str(game.get("pregame_series_state") or ""),
+        "postgame_series_state": str(game.get("postgame_series_state") or ""),
+        "live_card_context_selection": {
+            "selected_team": away_abbr,
+            "opponent": home_abbr,
+            "game_number": game_number,
+            "team_a_series_wins": team_a_series_wins,
+            "team_b_series_wins": team_b_series_wins,
+        },
     }
 
 
 def live_game_payload(game: dict) -> dict:
     game_date = live_game_date(game)
-    away_series_wins = game.get("away_series_wins")
-    home_series_wins = game.get("home_series_wins")
+    away_series_wins = game.get("current_away_series_wins", game.get("away_series_wins"))
+    home_series_wins = game.get("current_home_series_wins", game.get("home_series_wins"))
     game_number = game.get("game_number")
     away_abbr = str(game.get("away_abbr") or "")
     home_abbr = str(game.get("home_abbr") or "")
-    has_playoff_marker = bool(game.get("round") or game.get("series_label") or game_number)
+    away_score = game.get("away_score")
+    home_score = game.get("home_score")
+    status_text = str(game.get("status_text") or "")
+    status_id = _int_or_none(game.get("status_id"))
+    has_final_scores_without_status = (
+        status_id is None
+        and not status_text.strip()
+        and away_score is not None
+        and home_score is not None
+    )
+    completed = (
+        status_id == 3
+        or status_text.strip().lower() in {"final", "completed", "complete"}
+        or has_final_scores_without_status
+    )
+    card_status = "completed" if completed else ("if_necessary" if bool(game.get("if_necessary")) else "upcoming")
+    scheduled_game_number = game.get("scheduled_game_number") or game.get("requested_game_number")
+    if (
+        completed
+        and scheduled_game_number is None
+        and _int_or_none(away_series_wins) is not None
+        and _int_or_none(home_series_wins) is not None
+    ):
+        scheduled_game_number = int(away_series_wins) + int(home_series_wins)
+    if scheduled_game_number is None:
+        scheduled_game_number = game_number
+    has_playoff_marker = bool(
+        game.get("series_status")
+        or game.get("round")
+        or game.get("series_label")
+        or game.get("if_necessary")
+        or scheduled_game_number
+    )
     if (
         has_playoff_marker
-        and _int_or_none(game_number) == 1
+        and _int_or_none(scheduled_game_number) == 1
         and _int_or_none(away_series_wins) is None
         and _int_or_none(home_series_wins) is None
     ):
         away_series_wins = 0
         home_series_wins = 0
-    return {
+    current_series_status = str(
+        game.get("current_series_status")
+        or _derived_series_status(game, away_abbr, home_abbr)
+        or game.get("series_status")
+        or ""
+    )
+    resolved_context: dict = {}
+    if completed and bool(game.get("completed_game_replay")):
+        resolved_context = {
+            key: game.get(key)
+            for key in (
+                "resolved_game_number",
+                "resolved_team_a_series_wins",
+                "resolved_team_b_series_wins",
+                "resolved_series_score_text",
+                "pregame_series_state",
+                "postgame_series_state",
+                "displayed_series_state",
+                "conditional_context",
+                "context_available",
+                "assumed_prior_winners",
+                "previous_game_winner",
+                "previous_game_winner_side",
+                "previous_game_margin",
+                "context_note",
+                "completed_game_replay",
+                "loaded_game_winner",
+            )
+        }
+    elif (
+        completed
+        and has_playoff_marker
+        and _int_or_none(scheduled_game_number) is not None
+        and _int_or_none(away_series_wins) is not None
+        and _int_or_none(home_series_wins) is not None
+    ):
+        resolved_context = resolve_completed_game_pregame_state_for_card(
+            postgame_series_wins={
+                away_abbr: int(away_series_wins),
+                home_abbr: int(home_series_wins),
+            },
+            completed_games=list(game.get("current_completed_games") or []),
+            requested_game_number=int(scheduled_game_number),
+            requested_away_team=away_abbr,
+            requested_home_team=home_abbr,
+            game_id=str(game.get("game_id") or ""),
+            away_score=away_score,
+            home_score=home_score,
+        )
+        resolved_context["displayed_series_state"] = current_series_status
+    elif (
+        has_playoff_marker
+        and _int_or_none(scheduled_game_number) is not None
+        and _int_or_none(away_series_wins) is not None
+        and _int_or_none(home_series_wins) is not None
+        and max(int(away_series_wins), int(home_series_wins)) < 4
+    ):
+        resolved_context = resolve_pregame_series_state_for_card(
+            current_series_wins={
+                away_abbr: int(away_series_wins),
+                home_abbr: int(home_series_wins),
+            },
+            current_completed_games=list(game.get("current_completed_games") or []),
+            requested_game_number=int(scheduled_game_number),
+            requested_away_team=away_abbr,
+            requested_home_team=home_abbr,
+            if_necessary=bool(game.get("if_necessary")),
+            series_teams=(away_abbr, home_abbr),
+        )
+
+    payload = {
         "game_id": str(game.get("game_id") or ""),
         "away_abbr": away_abbr,
         "home_abbr": home_abbr,
         "game_datetime": game.get("game_datetime"),
         "game_date": game_date.isoformat(),
         "game_time": str(game.get("time_label") or game.get("date_label") or ""),
-        "season": nba_season_from_date(game_date),
-        "series_status": _derived_series_status(game, away_abbr, home_abbr),
+        "season": str(game.get("season") or nba_season_from_date(game_date)),
+        "series_status": current_series_status,
+        "current_series_status": current_series_status,
         "round": game.get("round"),
         "series_label": game.get("series_label"),
+        "status_id": status_id,
+        "status_text": status_text,
+        "card_status": card_status,
         "game_number": None if game_number is None else int(game_number),
+        "scheduled_game_number": None if scheduled_game_number is None else int(scheduled_game_number),
         "away_series_wins": None if away_series_wins is None else int(away_series_wins),
         "home_series_wins": None if home_series_wins is None else int(home_series_wins),
+        "current_away_series_wins": None if away_series_wins is None else int(away_series_wins),
+        "current_home_series_wins": None if home_series_wins is None else int(home_series_wins),
         "if_necessary": bool(game.get("if_necessary")),
-        "away_score": game.get("away_score"),
-        "home_score": game.get("home_score"),
+        "away_score": away_score,
+        "home_score": home_score,
+        "final_score": _plain_score_text(
+            {
+                "away_abbr": away_abbr,
+                "home_abbr": home_abbr,
+                "away_score": away_score,
+                "home_score": home_score,
+            }
+        )
+        if completed
+        else "",
         "date_label": str(game.get("date_label") or ""),
         "time_label": str(game.get("time_label") or game.get("date_label") or ""),
     }
+    payload.update(resolved_context)
+    return payload
 
 
 def live_card_key(section: str, payload: dict, index: int) -> str:
@@ -3150,9 +3454,26 @@ def series_context_sentence(context: dict) -> str:
     away_side = other_side(home_side)
     away = context["team_a"]["abbreviation"] if away_side == "Team A" else context["team_b"]["abbreviation"]
     home = context["team_a"]["abbreviation"] if home_side == "Team A" else context["team_b"]["abbreviation"]
+    if bool(context.get("completed_game_replay")):
+        sentence = (
+            f"Replay prediction: Game {game_number}, {away} away at {home} home, "
+            f"using the pregame series state {status or 'unavailable'}."
+        )
+        final_score = str(context.get("final_score_text") or "").strip()
+        if final_score:
+            sentence = (
+                f"{sentence} Historical result: {final_score}; "
+                "the final score is not used as a model input."
+            )
+        return sentence
     if not status:
-        return f"Series context: unavailable. This prediction is for Game {game_number}: {away} away at {home} home."
-    return f"Series context: {status}. This prediction is for Game {game_number}: {away} away at {home} home."
+        sentence = f"Series context: unavailable. This prediction is for Game {game_number}: {away} away at {home} home."
+    else:
+        sentence = f"Series context: {status}. This prediction is for Game {game_number}: {away} away at {home} home."
+    conditional_note = str(context.get("live_card_context_note") or "").strip()
+    if conditional_note:
+        sentence = f"{sentence} {conditional_note}"
+    return sentence
 
 
 def text_contradicts_series_status(text: str, context: dict) -> bool:
@@ -3525,6 +3846,16 @@ def _build_prediction_context_impl(
     team_a_series_wins: int = 0,
     team_b_series_wins: int = 0,
     raw_live_game_series_label: str = "",
+    conditional_context: bool = False,
+    series_context_available: bool = True,
+    assumed_prior_winners: list[str] | None = None,
+    previous_game_winner: str | None = None,
+    previous_game_margin: float | None = None,
+    live_card_context_note: str = "",
+    completed_game_replay: bool = False,
+    final_score_text: str = "",
+    pregame_series_state: str = "",
+    postgame_series_state: str = "",
 ) -> dict:
     team_b_probability = 1 - team_a_probability
     team_b_series_probability = None if team_a_series_probability is None else 1 - team_a_series_probability
@@ -3599,6 +3930,16 @@ def _build_prediction_context_impl(
         "series_leader": series_leader,
         "series_status_text": series_text,
         "raw_live_game_series_label": raw_live_game_series_label,
+        "conditional_context": bool(conditional_context),
+        "series_context_available": bool(series_context_available),
+        "assumed_prior_winners": list(assumed_prior_winners or []),
+        "previous_game_winner": previous_game_winner,
+        "previous_game_margin": previous_game_margin,
+        "live_card_context_note": live_card_context_note,
+        "completed_game_replay": bool(completed_game_replay),
+        "final_score_text": final_score_text,
+        "pregame_series_state": pregame_series_state,
+        "postgame_series_state": postgame_series_state,
         "user_series_context": {
             "game_number": int(game_number),
             "team_a_series_wins": selected_team_series_wins,
@@ -3609,6 +3950,16 @@ def _build_prediction_context_impl(
             "series_leader": series_leader,
             "series_status_text": series_text,
             "elimination_game": int(selected_team_series_wins == 3 or opponent_series_wins == 3),
+            "conditional_context": bool(conditional_context),
+            "context_available": bool(series_context_available),
+            "assumed_prior_winners": list(assumed_prior_winners or []),
+            "previous_game_winner": previous_game_winner,
+            "previous_game_margin": previous_game_margin,
+            "context_note": live_card_context_note,
+            "completed_game_replay": bool(completed_game_replay),
+            "final_score_text": final_score_text,
+            "pregame_series_state": pregame_series_state,
+            "postgame_series_state": postgame_series_state,
         },
         "team_a": {
             "label": team_a_label,
@@ -4336,6 +4687,34 @@ def main() -> None:
     if predict_clicked:
         try:
             alternate_home_team_arg = "team2" if home_team_arg == "team1" else "team1"
+            current_series_selection = {
+                "selected_team": str(team_a["TEAM_ABBREVIATION"]),
+                "opponent": str(team_b["TEAM_ABBREVIATION"]),
+                "game_number": int(game_number),
+                "team_a_series_wins": int(team_a_series_wins),
+                "team_b_series_wins": int(team_b_series_wins),
+            }
+            live_card_context_is_current = (
+                st.session_state.get("live_card_context_selection") == current_series_selection
+            )
+            live_series_context_metadata = (
+                {
+                    "conditional_context": bool(st.session_state.get("conditional_context", False)),
+                    "context_available": bool(st.session_state.get("series_context_available", True)),
+                    "assumed_prior_winners": list(st.session_state.get("assumed_prior_winners", [])),
+                    "previous_game_winner": st.session_state.get("previous_game_winner"),
+                    "previous_game_margin": st.session_state.get("previous_game_margin"),
+                    "context_note": str(st.session_state.get("live_card_context_note", "")),
+                    "resolved_series_score_text": str(st.session_state.get("resolved_series_score_text", "")),
+                    "card_status": str(st.session_state.get("live_card_status", "")),
+                    "completed_game_replay": bool(st.session_state.get("completed_game_replay", False)),
+                    "final_score_text": str(st.session_state.get("final_score_text", "")),
+                    "pregame_series_state": str(st.session_state.get("pregame_series_state", "")),
+                    "postgame_series_state": str(st.session_state.get("postgame_series_state", "")),
+                }
+                if live_card_context_is_current
+                else {}
+            )
             prediction_result = compute_matchup_prediction(
                 team_a=str(team_a["TEAM_ABBREVIATION"]),
                 team_b=str(team_b["TEAM_ABBREVIATION"]),
@@ -4347,9 +4726,11 @@ def main() -> None:
                 game_number=int(game_number),
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
+                series_context_metadata=live_series_context_metadata,
             )
             team_a_probability = prediction_result["team_a_probability"]
             team_a_series_probability = prediction_result["team_a_series_probability"]
+            series_context_note = prediction_result.get("series_context_note")
             features = prediction_result["features"]
             game_features = prediction_result["game_features"]
         except Exception as exc:
@@ -4385,6 +4766,7 @@ def main() -> None:
                 game_number=int(game_number),
                 team_a_series_wins=int(team_a_series_wins),
                 team_b_series_wins=int(team_b_series_wins),
+                series_context_metadata=live_series_context_metadata,
             )
             alternate_features = alternate_prediction_result["features"]
             alternate_probability = alternate_prediction_result["team_a_probability"]
@@ -4481,6 +4863,16 @@ def main() -> None:
             team_a_series_wins=int(team_a_series_wins),
             team_b_series_wins=int(team_b_series_wins),
             raw_live_game_series_label=str(st.session_state.get("raw_live_game_series_label", "")),
+            conditional_context=bool(live_series_context_metadata.get("conditional_context", False)),
+            series_context_available=bool(live_series_context_metadata.get("context_available", True)),
+            assumed_prior_winners=list(live_series_context_metadata.get("assumed_prior_winners", [])),
+            previous_game_winner=live_series_context_metadata.get("previous_game_winner"),
+            previous_game_margin=live_series_context_metadata.get("previous_game_margin"),
+            live_card_context_note=str(live_series_context_metadata.get("context_note", "")),
+            completed_game_replay=bool(live_series_context_metadata.get("completed_game_replay", False)),
+            final_score_text=str(live_series_context_metadata.get("final_score_text", "")),
+            pregame_series_state=str(live_series_context_metadata.get("pregame_series_state", "")),
+            postgame_series_state=str(live_series_context_metadata.get("postgame_series_state", "")),
         )
         initial_message = generate_initial_explanation(context)
         st.session_state["prediction_chat_messages"] = [{"role": "assistant", "content": initial_message}]
@@ -4490,6 +4882,11 @@ def main() -> None:
         st.session_state["prediction_payload"] = {
             "team_a_probability": team_a_probability,
             "team_a_series_probability": team_a_series_probability,
+            "base_team_a_probability": prediction_result.get("base_team_a_probability", team_a_probability),
+            "series_context_probability": prediction_result.get("series_context_probability"),
+            "series_context_applied": prediction_result.get("series_context_applied", False),
+            "series_context_note": series_context_note,
+            "series_context_features": prediction_result.get("series_context_features"),
             "features": features,
             "game_features": game_features,
             "feature_frame": feature_frame,
@@ -4506,6 +4903,7 @@ def main() -> None:
     context = st.session_state["prediction_context"]
     team_a_probability = payload["team_a_probability"]
     team_a_series_probability = payload.get("team_a_series_probability")
+    series_context_note = payload.get("series_context_note")
     features = payload["features"]
     game_features = payload.get("game_features", features)
     feature_frame = payload["feature_frame"]
@@ -4522,6 +4920,8 @@ def main() -> None:
     result_col, chat_col = st.columns([1.65, 1], gap="large")
     with result_col:
         render_probability_summary(team_a_display, team_b_display, team_a_probability, home_team)
+        if prediction_context_mode == PREDICTION_MODE_PLAYOFF and series_context_note:
+            st.caption(series_context_note)
         if prediction_context_mode == PREDICTION_MODE_PLAYOFF and team_a_series_probability is not None:
             render_series_probability_summary(team_a_display, team_b_display, team_a_series_probability)
         render_prediction_summary(team_a_display, team_b_display, team_a_probability)

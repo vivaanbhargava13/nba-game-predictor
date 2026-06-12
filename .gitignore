@@ -11,3 +11,12 @@ reports/.matplotlib/
 data/cache/
 data/processed/
 AGENTS.md
+
+# Ship the small offline-trained series-context layer and its audit outputs.
+!models/
+models/*
+!models/series_context_model.joblib
+!data/processed/
+data/processed/*
+!data/processed/series_context_training.csv
+!data/processed/series_context_model_comparison.csv

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from app import (
+    PREDICTION_MODE_CURRENT,
     PREDICTION_MODE_PLAYOFF,
     _cached_default_matchup_prediction,
     _cached_processed_csv,
@@ -67,6 +68,7 @@ class AppCachingTests(unittest.TestCase):
                 **kwargs,
                 model_version=(1, 100),
                 raw_data_version=(1, ()),
+                series_context_model_version=(1, 10),
             )
 
         self.assertEqual(actual["team_a_probability"], expected["team_a_probability"])
@@ -93,6 +95,7 @@ class AppCachingTests(unittest.TestCase):
             "team_a_series_wins": 3,
             "team_b_series_wins": 0,
             "model_version": (1, 100),
+            "series_context_model_version": (1, 10),
         }
         _cached_default_matchup_prediction.clear()
 
@@ -100,10 +103,84 @@ class AppCachingTests(unittest.TestCase):
             first = _cached_default_matchup_prediction(**kwargs, raw_data_version=(1, ()))
             second = _cached_default_matchup_prediction(**kwargs, raw_data_version=(1, ()))
             refreshed = _cached_default_matchup_prediction(**kwargs, raw_data_version=(2, ()))
+            retrained_context_kwargs = {
+                **kwargs,
+                "series_context_model_version": (2, 10),
+            }
+            retrained_context = _cached_default_matchup_prediction(
+                **retrained_context_kwargs,
+                raw_data_version=(2, ()),
+            )
 
         self.assertEqual(first["team_a_probability"], second["team_a_probability"])
         self.assertEqual(first["team_a_probability"], refreshed["team_a_probability"])
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(first["team_a_probability"], retrained_context["team_a_probability"])
+        self.assertEqual(len(calls), 6)
+
+    def test_current_hypothetical_does_not_apply_series_context_layer(self):
+        def fake_predictor(**kwargs):
+            probability = 0.64 if kwargs["team_a"] == "NYK" else 0.42
+            return probability, {"home_team_A": 0.0}, None, None, 5
+
+        with patch("app.apply_series_context_probability") as series_layer:
+            result = _compute_matchup_prediction_impl(
+                team_a="NYK",
+                team_b="CLE",
+                season="2025-26",
+                prediction_date="2026-05-25",
+                home_team="team2",
+                feature_season_type="Regular Season",
+                prediction_context_mode=PREDICTION_MODE_CURRENT,
+                predictor=fake_predictor,
+            )
+
+        series_layer.assert_not_called()
+        self.assertAlmostEqual(result["team_a_probability"], (0.64 + (1 - 0.42)) / 2)
+        self.assertFalse(result["series_context_applied"])
+
+    def test_playoff_mode_applies_saved_series_context_layer(self):
+        def fake_predictor(**kwargs):
+            team_a_id = 1 if kwargs["team_a"] == "NYK" else 2
+            team_b_id = 2 if kwargs["team_b"] == "CLE" else 1
+            return (
+                0.64 if kwargs["team_a"] == "NYK" else 0.42,
+                {"home_team_A": 0.0},
+                pd.Series({"TEAM_NAME": kwargs["team_a"]}, name=team_a_id),
+                pd.Series({"TEAM_NAME": kwargs["team_b"]}, name=team_b_id),
+                2,
+            )
+
+        blended = {
+            "probability": 0.55,
+            "base_probability": 0.61,
+            "context_probability": 0.40,
+            "applied": True,
+            "note": "learned blend",
+            "features": {"series_score_diff": -2.0},
+        }
+        _cached_default_matchup_prediction.clear()
+        with patch("app._predict_probability", side_effect=fake_predictor):
+            with patch("app.apply_series_context_probability", return_value=blended) as series_layer:
+                result = _cached_default_matchup_prediction(
+                    team_a="NYK",
+                    team_b="CLE",
+                    season="2025-26",
+                    prediction_date="2026-05-25",
+                    home_team="team2",
+                    feature_season_type="Regular Season",
+                    prediction_context_mode=PREDICTION_MODE_PLAYOFF,
+                    game_number=5,
+                    team_a_series_wins=1,
+                    team_b_series_wins=3,
+                    model_version=(1, 100),
+                    raw_data_version=(1, ()),
+                    series_context_model_version=(1, 10),
+                )
+
+        series_layer.assert_called_once()
+        self.assertEqual(result["team_a_probability"], 0.55)
+        self.assertAlmostEqual(result["base_team_a_probability"], 0.61)
+        self.assertTrue(result["series_context_applied"])
 
     def test_raw_data_version_changes_when_relevant_file_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

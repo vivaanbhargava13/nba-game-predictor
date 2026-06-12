@@ -316,6 +316,7 @@ def _series_context(event: dict[str, Any], competition: dict[str, Any], away_abb
         "away_series_wins": away_wins,
         "home_series_wins": home_wins,
         "game_number": game_number,
+        "scheduled_game_number": parsed_game_number,
     }
 
 

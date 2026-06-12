@@ -26,6 +26,7 @@ from app import (
     text_contradicts_series_status,
     validated_llm_response_or_fallback,
     series_status_text,
+    series_context_sentence,
     valid_team_a_series_win_options,
 )
 
@@ -49,6 +50,48 @@ class PredictionModeTests(unittest.TestCase):
         self.assertEqual(valid_team_a_series_win_options(1), [0])
         self.assertEqual(valid_team_a_series_win_options(5), [1, 2, 3])
         self.assertEqual(valid_team_a_series_win_options(7), [3])
+
+    def test_chat_series_sentence_mentions_conditional_assumption(self):
+        context = _prediction_context_for_series(
+            "SAS",
+            "NYK",
+            2,
+            3,
+            conditional_context=True,
+            assumed_prior_winners=["SAS"],
+            previous_game_winner="SAS",
+            previous_game_margin=None,
+            live_card_context_note=(
+                "Conditional context: assumes SAS wins Game 5; "
+                "the pregame state is NYK leads 3-2 before Game 6."
+            ),
+        )
+        context["user_series_context"]["game_number"] = 6
+
+        sentence = series_context_sentence(context)
+
+        self.assertIn("NYK leads 3-2", sentence)
+        self.assertIn("assumes SAS wins Game 5", sentence)
+        self.assertIn("Game 6", sentence)
+
+    def test_completed_game_chat_uses_replay_pregame_language(self):
+        context = _prediction_context_for_series(
+            "SAS",
+            "NYK",
+            1,
+            2,
+            completed_game_replay=True,
+            final_score_text="SAS 106 - 107 NYK",
+            pregame_series_state="NYK leads 2-1",
+            postgame_series_state="NYK leads 3-1",
+        )
+        context["user_series_context"]["game_number"] = 4
+
+        sentence = series_context_sentence(context)
+
+        self.assertIn("Replay prediction: Game 4", sentence)
+        self.assertIn("pregame series state NYK leads 2-1", sentence)
+        self.assertIn("final score is not used as a model input", sentence)
 
     def test_current_hypothetical_ignores_series_features(self):
         probabilities, captured_contexts = _run_prediction_pair(PREDICTION_MODE_CURRENT)
@@ -307,6 +350,7 @@ def _prediction_context_for_series(
     opponent_wins: int,
     team_a_probability: float = 0.6,
     team_a_series_probability: Optional[float] = None,
+    **context_overrides,
 ) -> dict:
     names = {
         "NYK": "New York Knicks",
@@ -354,6 +398,7 @@ def _prediction_context_for_series(
         game_number=selected_wins + opponent_wins + 1,
         team_a_series_wins=selected_wins,
         team_b_series_wins=opponent_wins,
+        **context_overrides,
     )
 
 

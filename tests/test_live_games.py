@@ -20,6 +20,7 @@ from app import (
     PREDICTION_MODE_PLAYOFF,
     compute_live_game_prediction,
     compute_matchup_prediction,
+    _upcoming_prediction_result_with_payload,
     _upcoming_prediction_result,
     build_live_games_topbar_html,
     get_team_colors,
@@ -180,6 +181,28 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(games[0]["away_series_wins"], 3)
         self.assertEqual(games[0]["home_series_wins"], 0)
         self.assertEqual(games[0]["game_number"], 4)
+        self.assertEqual(games[0]["scheduled_game_number"], 4)
+
+    def test_parse_espn_preserves_future_scheduled_game_number(self):
+        payload = _espn_payload(
+            "406",
+            "2026-06-18T00:00Z",
+            completed=False,
+            away_abbr="SA",
+            away_id="24",
+            away_name="San Antonio Spurs",
+            home_abbr="NY",
+            home_id="18",
+            home_name="New York Knicks",
+            series_status="NY leads 3-1",
+            game_number=6,
+            note="Game 6 - If Necessary",
+        )
+
+        game = parse_espn_scoreboard_games(payload)[0]
+
+        self.assertEqual(game["game_number"], 5)
+        self.assertEqual(game["scheduled_game_number"], 6)
 
     def test_parse_espn_completed_series_winner(self):
         payload = _espn_payload(
@@ -438,7 +461,7 @@ class LiveGamesTests(unittest.TestCase):
 
         lines = live_game_context_lines(game)
 
-        self.assertIn("NYK leads 3-0", lines)
+        self.assertIn("NYK leads series 3-0", lines)
         self.assertIn("IF NECESSARY", lines)
 
     def test_live_game_context_lines_show_completed_series_winner(self):
@@ -460,8 +483,171 @@ class LiveGamesTests(unittest.TestCase):
         tied_game = _game("404", "NYK", "SAS")
         tied_game["series_status"] = "Series tied 3-3"
 
-        self.assertIn("SAS leads 3-2", live_game_context_lines(leading_game))
+        self.assertIn("SAS leads series 3-2", live_game_context_lines(leading_game))
         self.assertIn("Series tied 3-3", live_game_context_lines(tied_game))
+
+    def test_game_five_card_keeps_compact_current_series_text(self):
+        game = _game("405", "NYK", "SAS")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 3,
+                "home_series_wins": 1,
+                "game_number": 5,
+                "scheduled_game_number": 5,
+            }
+        )
+
+        lines = live_game_context_lines(live_game_payload(game))
+
+        self.assertEqual(lines, ["NYK leads series 3-1"])
+
+    def test_game_six_card_uses_compact_conditional_copy(self):
+        game = _game("406", "SAS", "NYK")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "game_number": 5,
+                "scheduled_game_number": 6,
+                "if_necessary": True,
+            }
+        )
+
+        lines = live_game_context_lines(live_game_payload(game))
+
+        self.assertEqual(lines, ["IF NECESSARY", "NYK would lead 3-2*", "*conditional path"])
+        self.assertNotIn("Current:", " ".join(lines))
+        self.assertNotIn("Conditional pregame:", " ".join(lines))
+
+    def test_game_seven_card_uses_compact_conditional_copy(self):
+        game = _game("407", "NYK", "SAS")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 3,
+                "home_series_wins": 1,
+                "game_number": 5,
+                "scheduled_game_number": 7,
+                "if_necessary": True,
+            }
+        )
+
+        payload = live_game_payload(game)
+        lines = live_game_context_lines(payload)
+        output = build_live_games_topbar_html(
+            {"latest": [], "upcoming": [payload]},
+            model_available=False,
+        )
+
+        self.assertEqual(lines, ["IF NECESSARY", "Series would be tied 3-3*", "*conditional path"])
+        self.assertNotIn("Current:", output)
+        self.assertNotIn("Conditional pregame:", output)
+        self.assertIn('class="live-game-footnote">*conditional path</div>', output)
+        self.assertGreater(
+            output.index('class="live-game-footnote"'),
+            output.index('class="live-game-prediction"'),
+        )
+
+    def test_espn_zero_score_placeholders_remain_upcoming_playoff_context(self):
+        game_5 = _cached_upcoming_series_game(5, "NYK", "SAS", 3, 1, if_necessary=False)
+        game_6 = _cached_upcoming_series_game(6, "SAS", "NYK", 1, 3, if_necessary=True)
+        game_7 = _cached_upcoming_series_game(7, "NYK", "SAS", 3, 1, if_necessary=True)
+
+        payload_5 = live_game_payload(game_5)
+        payload_6 = live_game_payload(game_6)
+        payload_7 = live_game_payload(game_7)
+
+        self.assertEqual(payload_5["card_status"], "upcoming")
+        self.assertEqual(payload_5["resolved_game_number"], 5)
+        self.assertEqual(payload_5["resolved_series_score_text"], "NYK leads 3-1")
+        self.assertTrue(payload_5["context_available"])
+
+        self.assertEqual(payload_6["card_status"], "if_necessary")
+        self.assertEqual(payload_6["resolved_game_number"], 6)
+        self.assertEqual(payload_6["resolved_series_score_text"], "NYK leads 3-2")
+        self.assertEqual(payload_6["assumed_prior_winners"], ["SAS"])
+        self.assertTrue(payload_6["conditional_context"])
+        self.assertTrue(payload_6["context_available"])
+        self.assertEqual(
+            live_game_context_lines(payload_6),
+            ["IF NECESSARY", "NYK would lead 3-2*", "*conditional path"],
+        )
+
+        self.assertEqual(payload_7["card_status"], "if_necessary")
+        self.assertEqual(payload_7["resolved_game_number"], 7)
+        self.assertEqual(payload_7["resolved_series_score_text"], "Series tied 3-3")
+        self.assertEqual(payload_7["assumed_prior_winners"], ["SAS", "SAS"])
+        self.assertTrue(payload_7["conditional_context"])
+        self.assertTrue(payload_7["context_available"])
+        self.assertEqual(
+            live_game_context_lines(payload_7),
+            ["IF NECESSARY", "Series would be tied 3-3*", "*conditional path"],
+        )
+
+    def test_upcoming_if_necessary_cards_display_blended_context_probability(self):
+        cases = [
+            (
+                _cached_upcoming_series_game(6, "SAS", "NYK", 1, 3, if_necessary=True),
+                0.42,
+                "SAS 42% - <strong>58%</strong> NYK",
+            ),
+            (
+                _cached_upcoming_series_game(7, "NYK", "SAS", 3, 1, if_necessary=True),
+                0.28,
+                "NYK 28% - <strong>72%</strong> SAS",
+            ),
+        ]
+
+        for game, blended_probability, expected_text in cases:
+            with self.subTest(game_number=game["scheduled_game_number"]):
+                result = {
+                    "team_a_probability": blended_probability,
+                    "base_team_a_probability": 0.52,
+                    "series_context_probability": 0.31,
+                    "series_context_applied": True,
+                    "team_a_series_probability": None,
+                }
+                with patch("app._cached_live_card_prediction", return_value=result):
+                    prediction, debug, computed = _upcoming_prediction_result_with_payload(
+                        live_game_payload(game),
+                        model_available=True,
+                    )
+
+                self.assertIsNone(debug)
+                self.assertTrue(computed["series_context_applied"])
+                self.assertNotEqual(
+                    computed["team_a_probability"],
+                    computed["base_team_a_probability"],
+                )
+                self.assertEqual(prediction, expected_text)
+
+    def test_latest_completed_card_hides_internal_pending_context(self):
+        game = _game("game-4", "SAS", "NYK", away_score=106, home_score=107)
+        game.update(
+            {
+                "status_id": 3,
+                "status_text": "Final",
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "game_number": 5,
+            }
+        )
+
+        payload = live_game_payload(game)
+        output = build_live_games_topbar_html(
+            {"latest": [payload], "upcoming": []},
+            model_available=False,
+        )
+
+        self.assertEqual(payload["card_status"], "completed")
+        self.assertIn("NYK leads series 3-1", output)
+        self.assertIn("SAS", output)
+        self.assertIn("107", output)
+        self.assertNotIn("Playoff context pending prior result", output)
+        self.assertNotIn("conditional path", output)
 
     def test_upcoming_finals_card_context_lines_include_zero_zero_tie(self):
         game = _game("405", "NYK", "SAS")
@@ -492,6 +678,117 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(state["game_number"], 4)
         self.assertEqual(state["team_a_series_wins"], 3)
         self.assertEqual(state["team_b_series_wins"], 0)
+
+    def test_if_necessary_game_six_loads_resolved_conditional_state(self):
+        labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
+        game = _game("406", "SAS", "NYK")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "game_number": 5,
+                "scheduled_game_number": 6,
+                "if_necessary": True,
+            }
+        )
+
+        payload = live_game_payload(game)
+        state = live_game_selection_state(payload, labels)
+
+        self.assertEqual(payload["resolved_game_number"], 6)
+        self.assertEqual(payload["resolved_series_score_text"], "NYK leads 3-2")
+        self.assertEqual(payload["assumed_prior_winners"], ["SAS"])
+        self.assertIsNone(payload["previous_game_margin"])
+        self.assertEqual(state["game_number"], 6)
+        self.assertEqual(state["team_a_series_wins"], 2)
+        self.assertEqual(state["team_b_series_wins"], 3)
+        self.assertNotEqual((state["team_a_series_wins"], state["team_b_series_wins"]), (1, 3))
+        self.assertIn("SAS wins Game 5", state["live_card_context_note"])
+
+    def test_completed_game_four_loads_pregame_replay_state(self):
+        labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
+        game = _game("game-4", "SAS", "NYK", away_score=106, home_score=107)
+        game.update(
+            {
+                "status_id": 3,
+                "status_text": "Final",
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "game_number": 5,
+                "current_completed_games": [
+                    {
+                        "game_id": "game-3",
+                        "game_number": 3,
+                        "away_abbr": "NYK",
+                        "home_abbr": "SAS",
+                        "away_score": 101,
+                        "home_score": 106,
+                    },
+                    {
+                        "game_id": "game-4",
+                        "game_number": 4,
+                        "away_abbr": "SAS",
+                        "home_abbr": "NYK",
+                        "away_score": 106,
+                        "home_score": 107,
+                    },
+                ],
+            }
+        )
+
+        payload = live_game_payload(game)
+        state = live_game_selection_state(payload, labels)
+        prediction_context = live_game_prediction_context(payload)
+
+        self.assertEqual(payload["scheduled_game_number"], 4)
+        self.assertEqual(payload["pregame_series_state"], "NYK leads 2-1")
+        self.assertEqual(payload["postgame_series_state"], "NYK leads 3-1")
+        self.assertEqual(payload["previous_game_winner"], "SAS")
+        self.assertEqual(payload["previous_game_margin"], 5)
+        self.assertEqual(state["game_number"], 4)
+        self.assertNotEqual(state["game_number"], 5)
+        self.assertEqual(state["team_a_series_wins"], 1)
+        self.assertEqual(state["team_b_series_wins"], 2)
+        self.assertNotEqual((state["team_a_series_wins"], state["team_b_series_wins"]), (1, 3))
+        self.assertTrue(state["completed_game_replay"])
+        self.assertEqual(prediction_context["game_number"], 4)
+        self.assertEqual(prediction_context["team_a_series_wins"], 1)
+        self.assertEqual(prediction_context["team_b_series_wins"], 2)
+        self.assertEqual(
+            prediction_context["series_context_metadata"]["previous_game_winner"],
+            "SAS",
+        )
+        self.assertEqual(
+            prediction_context["series_context_metadata"]["previous_game_margin"],
+            5,
+        )
+
+    def test_if_necessary_game_seven_loads_tied_conditional_state(self):
+        labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
+        game = _game("407", "NYK", "SAS")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 3,
+                "home_series_wins": 1,
+                "game_number": 5,
+                "scheduled_game_number": 7,
+                "if_necessary": True,
+            }
+        )
+
+        payload = live_game_payload(game)
+        state = live_game_selection_state(payload, labels)
+
+        self.assertEqual(payload["resolved_game_number"], 7)
+        self.assertEqual(payload["resolved_series_score_text"], "Series tied 3-3")
+        self.assertEqual(payload["assumed_prior_winners"], ["SAS", "SAS"])
+        self.assertEqual(state["game_number"], 7)
+        self.assertEqual(state["team_a_series_wins"], 3)
+        self.assertEqual(state["team_b_series_wins"], 3)
+        self.assertIn("SAS wins Games 5 and 6", state["live_card_context_note"])
 
     def test_finals_game_one_click_loads_playoff_context_with_zero_zero_score(self):
         labels = ["New York Knicks (NYK)", "San Antonio Spurs (SAS)"]
@@ -678,6 +975,14 @@ class LiveGamesTests(unittest.TestCase):
 
         self.assertNotEqual(base_key, upcoming_prediction_cache_key(base, model_version=(2, 100)))
         self.assertNotEqual(
+            base_key,
+            upcoming_prediction_cache_key(
+                base,
+                model_version=(1, 100),
+                series_context_model_version=(2, 100),
+            ),
+        )
+        self.assertNotEqual(
             upcoming_prediction_cache_key(
                 base,
                 model_version=(1, 100),
@@ -688,6 +993,27 @@ class LiveGamesTests(unittest.TestCase):
                 model_version=(1, 100),
                 raw_data_version=(2, ()),
             ),
+        )
+
+    def test_upcoming_cache_key_includes_resolved_conditional_context(self):
+        game = _game("406", "SAS", "NYK")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "scheduled_game_number": 6,
+                "if_necessary": True,
+            }
+        )
+        conditional = live_game_payload(game)
+        changed = dict(conditional)
+        changed["conditional_context"] = False
+        changed["assumed_prior_winners"] = []
+
+        self.assertNotEqual(
+            upcoming_prediction_cache_key(conditional, model_version=(1, 100)),
+            upcoming_prediction_cache_key(changed, model_version=(1, 100)),
         )
 
     def test_live_game_render_payloads_limit_to_three_per_section(self):
@@ -810,6 +1136,31 @@ class LiveGamesTests(unittest.TestCase):
         self.assertEqual(card["team_a_series_probability"], main["team_a_series_probability"])
         self.assertIn("NYK 44% - <strong>56%</strong> CLE", prediction)
         self.assertNotIn("Series:", prediction)
+
+    def test_compact_card_copy_does_not_change_prediction_probability(self):
+        def fake_predictor(**kwargs):
+            probability = 0.42 if kwargs["team_a"] == "SAS" else 0.58
+            return probability, {}, None, None, None
+
+        game = _game("406", "SAS", "NYK")
+        game.update(
+            {
+                "series_status": "NYK leads 3-1",
+                "away_series_wins": 1,
+                "home_series_wins": 3,
+                "game_number": 5,
+                "scheduled_game_number": 6,
+                "if_necessary": True,
+            }
+        )
+        payload = live_game_payload(game)
+        before = compute_live_game_prediction(payload, model_available=True, predictor=fake_predictor)
+
+        live_game_context_lines(payload)
+
+        after = compute_live_game_prediction(payload, model_available=True, predictor=fake_predictor)
+        self.assertEqual(before["team_a_probability"], after["team_a_probability"])
+        self.assertEqual(before["team_a_series_probability"], after["team_a_series_probability"])
 
     def test_sas_at_okc_live_card_probability_matches_main_prediction_helper(self):
         def fake_predictor(**kwargs):
@@ -1010,6 +1361,28 @@ def _game(
         "home_score": home_score,
         "date_label": "May 25, 2026",
         "time_label": "May 25, 7:30 PM ET",
+    }
+
+
+def _cached_upcoming_series_game(
+    game_number: int,
+    away_abbr: str,
+    home_abbr: str,
+    away_series_wins: int,
+    home_series_wins: int,
+    *,
+    if_necessary: bool,
+) -> dict:
+    return {
+        **_game(f"game-{game_number}", away_abbr, home_abbr, away_score=0, home_score=0),
+        "status_id": 1,
+        "status_text": "Scheduled",
+        "series_status": "NYK leads series 3-1",
+        "game_number": 5,
+        "scheduled_game_number": game_number,
+        "away_series_wins": away_series_wins,
+        "home_series_wins": home_series_wins,
+        "if_necessary": if_necessary,
     }
 
 
